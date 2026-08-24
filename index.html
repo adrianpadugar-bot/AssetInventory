@@ -697,12 +697,12 @@ let db = {
     {id:4,name:"Fleet Parts PH"},
   ],
   users: [
-    {id:1,name:"Juan Dela Cruz",email:"juan.delacruz@fleetstock.ph",role:"Admin",status:"Active",password:"admin123",site:"overall"},
-    {id:2,name:"Maria Santos",email:"maria.santos@fleetstock.ph",role:"Warehouse Staff",status:"Active",password:"warehouse123",site:1},
-    {id:3,name:"Pedro Reyes",email:"pedro.reyes@fleetstock.ph",role:"Warehouse Staff",status:"Active",password:"warehouse123",site:2},
-    {id:4,name:"Angela Bautista",email:"angela.bautista@fleetstock.ph",role:"Procurement",status:"Active",password:"procure123",site:"overall"},
-    {id:5,name:"Louie Fajardo",email:"louie.fajardo@fleetstock.ph",role:"Viewer",status:"Inactive",password:"viewer123",site:1},
-    {id:6,name:"Carlos Villanueva",email:"carlos.villanueva@fleetstock.ph",role:"Approver",status:"Active",password:"approve123",site:"overall"},
+    {id:1,name:"Juan Dela Cruz",email:"juan.delacruz@fleetstock.ph",role:"Admin",status:"Active",password:"admin123",sites:["overall"]},
+    {id:2,name:"Maria Santos",email:"maria.santos@fleetstock.ph",role:"Warehouse Staff",status:"Active",password:"warehouse123",sites:[1]},
+    {id:3,name:"Pedro Reyes",email:"pedro.reyes@fleetstock.ph",role:"Warehouse Staff",status:"Active",password:"warehouse123",sites:[2]},
+    {id:4,name:"Angela Bautista",email:"angela.bautista@fleetstock.ph",role:"Procurement",status:"Active",password:"procure123",sites:["overall"]},
+    {id:5,name:"Louie Fajardo",email:"louie.fajardo@fleetstock.ph",role:"Viewer",status:"Inactive",password:"viewer123",sites:[1]},
+    {id:6,name:"Carlos Villanueva",email:"carlos.villanueva@fleetstock.ph",role:"Approver",status:"Active",password:"approve123",sites:["overall"]},
   ],
   /* Running counter for R&M Transmittal Form numbers, keyed by year
      (e.g. {"2026": 3}) — see nextTransmittalNumber(). Synced like every
@@ -1150,7 +1150,26 @@ function isOverall(){ return currentSite==="overall"; }
    literally Overall. Anyone assigned a specific site is locked to that site
    everywhere in the app — they should never be able to view or export another
    site's data, or switch into Overall aggregate view. */
-function hasOverallAccess(){ return !!(currentUser && currentUser.site==="overall"); }
+/* An account's Site Access is now a LIST of sites (a user can be granted
+   access to several specific sites, not just one). `sites` is the array
+   field going forward; `userSites()` also understands the older singular
+   `site` field so any account data saved before this feature (local or
+   already in the shared cloud database) keeps working without a manual
+   migration step. */
+function userSites(u){
+  if(!u) return [];
+  if(Array.isArray(u.sites)) return u.sites;
+  if(u.site!=null) return [u.site];
+  return ["overall"];
+}
+function userHasOverallAccess(u){ return userSites(u).includes("overall"); }
+/* IDs (as strings) of every site a given account can access — every active
+   site for an Overall account, otherwise just the specific sites granted. */
+function userSiteIds(u){
+  return userHasOverallAccess(u) ? activeSites().map(s=>String(s.id)) : userSites(u).map(String);
+}
+function userCanAccessSite(u, siteId){ return userHasOverallAccess(u) || userSiteIds(u).includes(String(siteId)); }
+function hasOverallAccess(){ return !!(currentUser && userHasOverallAccess(currentUser)); }
 function scopedReceiving(){ return isOverall() ? db.receiving : db.receiving.filter(r=>String(r.site)===String(currentSite)); }
 function scopedWithdrawals(){ return isOverall() ? db.withdrawals : db.withdrawals.filter(w=>String(w.site)===String(currentSite)); }
 function scopedReturns(){ return isOverall() ? db.returns : db.returns.filter(r=>String(r.site)===String(currentSite)); }
@@ -1169,22 +1188,55 @@ function siteOptionList(selected){
    are exempt and can always pick freely, regardless of their own
    assigned Site Access. Called right after a form's Site <select> is
    populated, so it can lock it down in place. */
-function siteFieldShouldLock(){ return !(isAdmin() || hasOverallAccess()); }
+/* An account tied to exactly one specific site is fully locked to it, as
+   before. An account granted MULTIPLE specific sites isn't locked to a
+   single value, but its choices are still restricted to just the sites
+   it was granted — it can never pick a site outside its Site Access. */
+function siteFieldShouldLock(){ return !(isAdmin() || hasOverallAccess()) && userSiteIds(currentUser).length<=1; }
 function applySiteFieldLock(selectId){
   const sel = document.getElementById(selectId);
   if(!sel) return;
-  if(siteFieldShouldLock()){
+  if(isAdmin() || hasOverallAccess()){
+    sel.disabled = false;
+    sel.title = "";
+    return;
+  }
+  const mySiteIds = userSiteIds(currentUser);
+  if(mySiteIds.length<=1){
     sel.innerHTML = `<option value="${esc(currentSite)}" selected>${esc(siteName(currentSite))}</option>`;
     sel.disabled = true;
     sel.title = "Your account is limited to this site. Contact an admin to change your Site Access.";
   } else {
+    sel.innerHTML = activeSites().filter(s=>mySiteIds.includes(String(s.id)))
+      .map(s=>`<option value="${s.id}" ${String(s.id)===String(currentSite)?'selected':''}>${esc(s.name)}</option>`).join("");
     sel.disabled = false;
-    sel.title = "";
+    sel.title = "Choose from the sites your account has access to.";
   }
 }
 function siteScopeOptionList(selected){
   return `<option value="overall" ${selected==="overall"?'selected':''}>◆ Overall (all sites)</option>` +
     activeSites().map(s=>`<option value="${s.id}" ${String(s.id)===String(selected)?'selected':''}>${esc(s.name)}</option>`).join("");
+}
+/* Site-switcher options for a specific account: Overall accounts get every
+   active site plus Overall (unchanged behavior); accounts with one or more
+   specific sites only ever see the sites they were granted. */
+function mySiteScopeOptionList(user, selected){
+  if(userHasOverallAccess(user)) return siteScopeOptionList(selected);
+  const mySiteIds = userSiteIds(user);
+  return activeSites().filter(s=>mySiteIds.includes(String(s.id)))
+    .map(s=>`<option value="${s.id}" ${String(s.id)===String(selected)?'selected':''}>${esc(s.name)}</option>`).join("");
+}
+/* Checkbox-list markup for the User Management form, where an admin grants
+   one or more specific sites (or Overall) to an account. */
+function siteAccessCheckboxList(selectedSites){
+  const sites = selectedSites || [];
+  const isOverallSel = sites.includes("overall");
+  return `
+    <label class="checkbox-row"><input type="checkbox" id="f_user_site_overall" ${isOverallSel?"checked":""}> ◆ Overall (all sites)</label>
+    <div id="f_user_site_list" style="display:flex;flex-wrap:wrap;gap:2px 20px;${isOverallSel?"opacity:.45;":""}">
+      ${activeSites().map(s=>`<label class="checkbox-row"><input type="checkbox" class="f_user_site_chk" value="${s.id}" ${(!isOverallSel && sites.map(String).includes(String(s.id)))?"checked":""} ${isOverallSel?"disabled":""}> ${esc(s.name)}</label>`).join("")}
+    </div>
+  `;
 }
 
 function scopedAdjustments(){ return isOverall() ? db.adjustments : db.adjustments.filter(a=>String(a.site)===String(currentSite)); }
@@ -1237,22 +1289,24 @@ function scopedTransfers(){ return isOverall() ? db.transfers : db.transfers.fil
 let notifDismissedKeys = new Set();
 let notifPanelOpenFlag = false;
 
-function notifRelevantSite(){
-  return currentUser && !hasOverallAccess() ? String(currentUser.site) : null;
+function notifRelevantSites(){
+  return currentUser && !hasOverallAccess() ? userSiteIds(currentUser) : null;
 }
 function buildTransferNotifications(){
   if(!currentUser || isSinglePurposeAccount()) return [];
-  const mySite = notifRelevantSite(); // null = Overall account sees every site
+  const mySites = notifRelevantSites(); // null = Overall account sees every site
   const out = [];
   db.transfers.forEach(t=>{
-    if(mySite!=null && String(t.fromSite)!==mySite && String(t.toSite)!==mySite) return;
+    const toMine = mySites!=null && mySites.includes(String(t.toSite));
+    const fromMine = mySites!=null && mySites.includes(String(t.fromSite));
+    if(mySites!=null && !toMine && !fromMine) return;
     const received = isTransferReceived(t);
     let title, tone;
     if(received){
       title = "Transfer Received"; tone = "good";
-    } else if(mySite!=null && String(t.toSite)===mySite){
+    } else if(toMine){
       title = "Transfer — For Receive"; tone = "critical";
-    } else if(mySite!=null && String(t.fromSite)===mySite){
+    } else if(fromMine){
       title = "Transfer — In-Transit"; tone = "steel";
     } else {
       // Overall account viewing a transfer that isn't received yet
@@ -1263,23 +1317,23 @@ function buildTransferNotifications(){
       key: `transfer-${t.id}-${received?"received":"pending"}`,
       tone, iconName:"transfer", title, message: msg,
       timestamp: received ? (t.receivedDate || t.date) : (t.timestamp || t.date),
-      onOpen: ()=>{ if(mySite==null){ /* overall: leave scope as-is, table shows all */ } goTo("transfer"); },
+      onOpen: ()=>{ if(mySites==null){ /* overall: leave scope as-is, table shows all */ } else if(!mySites.includes(String(currentSite))){ currentSite = toMine ? t.toSite : t.fromSite; } goTo("transfer"); },
     });
   });
   return out;
 }
 function buildCycleCountNotifications(){
   if(!currentUser || isSinglePurposeAccount()) return [];
-  const mySite = notifRelevantSite();
+  const mySites = notifRelevantSites();
   const out = [];
   db.ccSessions.forEach(s=>{
-    if(mySite!=null && String(s.site)!==mySite) return;
+    if(mySites!=null && !mySites.includes(String(s.site))) return;
     out.push({
       key: `cyclecount-${s.id}`,
       tone:"accent", iconName:"check", title:"Cycle Count Created",
       message:`New cycle count started at ${esc(siteName(s.site))}${s.status==="completed"?" — now completed":""}`,
       timestamp: s.createdAt || s.date,
-      onOpen: ()=>{ if(mySite==null) currentSite = s.site; goTo("cyclecount"); },
+      onOpen: ()=>{ if(mySites==null) currentSite = s.site; else if(!mySites.includes(String(currentSite))) currentSite = s.site; goTo("cyclecount"); },
     });
   });
   return out;
@@ -1532,7 +1586,13 @@ function attemptLogin(){
   if(!pw){ errEl.textContent = "Enter your password."; return; }
   if(pw !== u.password){ errEl.textContent = "Incorrect password. Please try again."; document.getElementById("loginPassword").value=""; return; }
   currentUser = u;
-  currentSite = (u.site && u.site!=="overall" && siteObj(u.site)) ? u.site : "overall";
+  if(userHasOverallAccess(u)){
+    currentSite = "overall";
+  } else {
+    const mySiteIds = userSiteIds(u);
+    const firstValid = mySiteIds.find(id=>siteObj(id));
+    currentSite = firstValid!=null ? firstValid : "overall";
+  }
   notifDismissedKeys = new Set();
   currentView = isSinglePurposeAccount() ? "requests" : "dashboard";
   document.getElementById("loginPassword").value = "";
@@ -1550,12 +1610,19 @@ function populateSiteScopeSelect(){
     sel.disabled = false;
     sel.title = "Switch site scope";
   } else {
-    // Site-restricted account: the only option ever shown is the site this
-    // account was assigned in User Management. No "Overall" option, no other
-    // sites — and the control is locked so it can't be changed client-side.
-    sel.innerHTML = `<option value="${esc(currentSite)}" selected>${esc(siteName(currentSite))}</option>`;
-    sel.disabled = true;
-    sel.title = "Your account is limited to this site. Contact an admin to change your Site Access.";
+    // Site-restricted account: only the site(s) this account was granted in
+    // User Management ever appear — no "Overall" option, no other sites.
+    // A single-site account stays locked as before; an account granted
+    // several sites gets a dropdown limited to just those sites.
+    const mySiteIds = userSiteIds(currentUser);
+    sel.innerHTML = mySiteScopeOptionList(currentUser, currentSite);
+    if(mySiteIds.length<=1){
+      sel.disabled = true;
+      sel.title = "Your account is limited to this site. Contact an admin to change your Site Access.";
+    } else {
+      sel.disabled = false;
+      sel.title = "Switch between your assigned sites";
+    }
   }
 }
 document.getElementById("siteScopeSelect").addEventListener("change", (e)=>{
@@ -6430,7 +6497,12 @@ function renderSiteTable(){
     askConfirm("Delete site?", hasData ? "This site has receiving/withdrawal records. Its historical records will remain but will no longer be reachable from the site switcher." : "This site has no records yet.", ()=>{
       db.sites = db.sites.filter(s=>s.id!==id);
       if(String(currentSite)===String(id)){
-        currentSite = hasOverallAccess() ? "overall" : currentUser.site;
+        if(hasOverallAccess()){
+          currentSite = "overall";
+        } else {
+          const remaining = userSiteIds(currentUser).filter(sid=>String(sid)!==String(id) && siteObj(sid));
+          currentSite = remaining[0] || "overall";
+        }
       }
       saveModule("sites");
       renderSiteTable();
@@ -6457,8 +6529,12 @@ function renderUsers(){
         <div class="field"><label>Email</label><input id="f_user_email" type="email" placeholder="name@company.com"></div>
         <div class="field"><label>Password</label><input id="f_user_password" type="password" placeholder="Set login password" autocomplete="new-password"></div>
         <div class="field"><label>Role</label><select id="f_user_role">${optionList(ROLES)}</select></div>
-        <div class="field"><label>Site Access</label><select id="f_user_site">${siteScopeOptionList()}</select></div>
         <div class="field"><label>Status</label><select id="f_user_status">${optionList(["Active","Inactive"])}</select></div>
+      </div>
+      <div class="field" style="margin-top:10px;">
+        <label>Site Access</label>
+        <div id="f_user_site_group">${siteAccessCheckboxList(["overall"])}</div>
+        <div class="field-note">Check one or more sites to grant access to just those sites, or check Overall to grant access to every site.</div>
       </div>
       <div class="field-note" id="userPwNote"></div>
       <div class="form-actions">
@@ -6478,17 +6554,40 @@ function renderUsers(){
   document.getElementById("btnSaveUser").addEventListener("click", saveUser);
   renderUserTable();
 }
+/* Wires the Overall checkbox <-> individual site checkboxes mutual
+   exclusivity: checking Overall grants every site and disables/clears the
+   individual list; checking any individual site clears Overall. Re-run
+   after every innerHTML swap of the group since the nodes are recreated. */
+function wireUserSiteCheckboxes(){
+  const overallChk = document.getElementById("f_user_site_overall");
+  const listEl = document.getElementById("f_user_site_list");
+  if(!overallChk || !listEl) return;
+  overallChk.addEventListener("change", ()=>{
+    listEl.querySelectorAll(".f_user_site_chk").forEach(cb=>{ cb.disabled = overallChk.checked; if(overallChk.checked) cb.checked = false; });
+    listEl.style.opacity = overallChk.checked ? ".45" : "1";
+  });
+  listEl.querySelectorAll(".f_user_site_chk").forEach(cb=>{
+    cb.addEventListener("change", ()=>{ if(cb.checked) overallChk.checked = false; });
+  });
+}
+function selectedUserSites(){
+  const overallChk = document.getElementById("f_user_site_overall");
+  if(overallChk && overallChk.checked) return ["overall"];
+  const picked = Array.from(document.querySelectorAll(".f_user_site_chk:checked")).map(cb=>parseInt(cb.value));
+  return picked;
+}
 function openUserForm(id){
   userEditId = id || null;
   const panel = document.getElementById("userFormPanel");
   panel.classList.add("open");
   document.getElementById("userFormTitle").textContent = id ? "Edit User" : "Add User";
-  const u = id ? db.users.find(x=>x.id===id) : {name:"",email:"",role:ROLES[0],status:"Active",password:"",site:"overall"};
+  const u = id ? db.users.find(x=>x.id===id) : {name:"",email:"",role:ROLES[0],status:"Active",password:"",sites:["overall"]};
   document.getElementById("f_user_name").value = u.name;
   document.getElementById("f_user_email").value = u.email;
   document.getElementById("f_user_password").value = "";
   document.getElementById("f_user_role").value = u.role;
-  document.getElementById("f_user_site").innerHTML = siteScopeOptionList(u.site||"overall");
+  document.getElementById("f_user_site_group").innerHTML = siteAccessCheckboxList(userSites(u));
+  wireUserSiteCheckboxes();
   document.getElementById("f_user_status").value = u.status;
   document.getElementById("userPwNote").textContent = id ? "Leave blank to keep the current password." : "Required for this account to be able to log in.";
   panel.scrollIntoView({behavior:"smooth", block:"nearest"});
@@ -6502,13 +6601,15 @@ function saveUser(){
   const isEdit = !!userEditId;
   const prior = isEdit ? db.users.find(x=>x.id===userEditId) : null;
   if(!isEdit && !pw){ toast("Set a password for this account"); return; }
-  const rec = { id: isEdit ? userEditId : null, name, email, role: document.getElementById("f_user_role").value, site: document.getElementById("f_user_site").value, status: document.getElementById("f_user_status").value, password: pw ? pw : (prior ? prior.password : "") };
+  const sites = selectedUserSites();
+  if(!sites.length){ toast("Select at least one site, or check Overall"); return; }
+  const rec = { id: isEdit ? userEditId : null, name, email, role: document.getElementById("f_user_role").value, sites, status: document.getElementById("f_user_status").value, password: pw ? pw : (prior ? prior.password : "") };
   openReviewConfirm("Confirm User Entry — Is this accurate?", [
     {label:"Name", value:rec.name},
     {label:"Email", value:rec.email},
     {label:"Password", value: pw ? "•".repeat(Math.min(pw.length,10)) + " (new)" : "Unchanged"},
     {label:"Role", value:rec.role},
-    {label:"Site Access", value:siteName(rec.site)},
+    {label:"Site Access", value:sitesLabel(rec.sites)},
     {label:"Status", value:rec.status},
   ], ()=>commitUser(rec, isEdit));
 }
@@ -6525,6 +6626,14 @@ function commitUser(rec, isEdit){
   renderUserTable();
   toast("User saved");
 }
+/* Display label for a user's Site Access — "Overall" for full access,
+   otherwise a comma-separated list of the specific site names granted. */
+function sitesLabel(sites){
+  const list = sites || [];
+  if(list.includes("overall")) return "Overall";
+  if(!list.length) return "—";
+  return list.map(id=>siteName(id)).join(", ");
+}
 function renderUserTable(){
   const tbody = document.getElementById("userTbody");
   if(db.users.length===0){ tbody.innerHTML = `<tr><td colspan="6"><div class="empty-state">${icon("users")}<p>No users yet.</p></div></td></tr>`; return; }
@@ -6533,7 +6642,9 @@ function renderUserTable(){
       <td>${esc(u.name)}</td>
       <td class="mono">${esc(u.email)}</td>
       <td><span class="badge badge-role">${esc(u.role)}</span></td>
-      <td><span class="pill">${esc(siteName(u.site))}</span></td>
+      <td>${userSites(u).includes("overall")
+          ? `<span class="pill">Overall</span>`
+          : userSites(u).map(id=>`<span class="pill" style="margin:1px 3px 1px 0;display:inline-block;">${esc(siteName(id))}</span>`).join("")}</td>
       <td><span class="badge badge-${u.status==='Active'?'active':'inactive'}">${u.status}</span></td>
       <td>
         <button class="icon-btn" data-edit="${u.id}" title="Edit">${icon("edit")}</button>
@@ -6648,7 +6759,7 @@ function exportModule(key){
   } else if(key==="sites"){
     downloadCSV("site_list.csv", ["Name","Code","Location","Status","OnHandValue"], db.sites.map(s=>[s.name,s.code,s.location,s.status,siteStockValue(s.id)]));
   } else if(key==="users"){
-    downloadCSV("user_list.csv", ["Name","Email","Role","Status","Site"], db.users.map(u=>[u.name,u.email,u.role,u.status,siteName(u.site)]));
+    downloadCSV("user_list.csv", ["Name","Email","Role","Status","Site Access"], db.users.map(u=>[u.name,u.email,u.role,u.status,sitesLabel(userSites(u))]));
   }
 }
 
