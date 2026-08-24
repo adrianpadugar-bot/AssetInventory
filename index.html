@@ -4872,6 +4872,7 @@ let ccActivePage = 0;
 let ccActivePageSessionId = null;
 let ccDetailPage = 0;
 let ccDetailPageSessionId = null;
+let ccSelected = new Set();
 function getActiveSession(){ return scopedCcSessions().find(s=>s.status==="in-progress"); }
 function computeSessionStats(session){
   const total = session.items.length || 1;
@@ -4895,6 +4896,7 @@ function renderCycleCount(){
   if(active){ renderActiveSession(active); return; }
 
   const completed = scopedCcSessions().filter(s=>s.status==="completed").sort((a,b)=>b.date.localeCompare(a.date));
+  ccSelected.forEach(id => { if(!completed.some(s=>s.id===id)) ccSelected.delete(id); });
   el.innerHTML = `
     <div class="card card-pad" style="margin-bottom:18px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:14px;">
       <div>
@@ -4904,25 +4906,89 @@ function renderCycleCount(){
       <button class="btn btn-accent" id="btnProceedCC">${icon("check")} Proceed with Cycle Count</button>
     </div>
     <div class="section-head"><h3 style="font-size:16px;">Cycle count history</h3></div>
+    <div class="bulk-bar" id="ccBulkBar">
+      <span><strong id="ccSelectedCount">0</strong> cycle count(s) selected</span>
+      <div class="spacer"></div>
+      <button class="btn" id="btnClearCcSelection">Clear</button>
+      <button class="btn btn-danger" id="btnDeleteSelectedCC">${icon("trash")} Delete Selected</button>
+    </div>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Date</th><th>SKUs Counted</th><th>Accuracy Rate</th><th>Damaged Rate</th><th>Unrecorded Rate</th><th></th></tr></thead>
+        <thead><tr>
+          <th style="width:34px;"><input type="checkbox" id="ccSelectAll" title="Select all"></th>
+          <th>Date</th><th>SKUs Counted</th><th>Accuracy Rate</th><th>Damaged Rate</th><th>Unrecorded Rate</th><th></th>
+        </tr></thead>
         <tbody>${completed.length ? completed.map(s=>{
           const st = computeSessionStats(s);
           return `<tr>
+            <td><input type="checkbox" class="cc-row-check" data-id="${s.id}" ${ccSelected.has(s.id)?"checked":""}></td>
             <td class="mono">${s.date}</td>
             <td class="mono">${st.total}</td>
             <td class="mono" style="color:var(--good);font-weight:700;">${st.accuracyRate.toFixed(1)}%</td>
             <td class="mono" style="color:var(--critical);">${st.damagedRate.toFixed(1)}%</td>
             <td class="mono" style="color:var(--none);">${st.unrecordedRate.toFixed(1)}%</td>
-            <td><button class="btn btn-sm" data-view="${s.id}">View</button></td>
+            <td style="white-space:nowrap;">
+              <button class="btn btn-sm" data-view="${s.id}">View</button>
+              <button class="icon-btn" data-del="${s.id}" title="Delete">${icon("trash")}</button>
+            </td>
           </tr>`;
-        }).join("") : `<tr><td colspan="6" style="color:var(--text-faint)">No completed cycle counts yet for this site.</td></tr>`}</tbody>
+        }).join("") : `<tr><td colspan="7" style="color:var(--text-faint)">No completed cycle counts yet for this site.</td></tr>`}</tbody>
       </table>
     </div>
   `;
   document.getElementById("btnProceedCC").addEventListener("click", startCycleCountSession);
   el.querySelectorAll("[data-view]").forEach(b=>b.addEventListener("click", ()=>{ ccViewSessionId=parseInt(b.dataset.view); renderCycleCount(); }));
+  el.querySelectorAll("[data-del]").forEach(b=>b.addEventListener("click", ()=>{
+    const id = parseInt(b.dataset.del);
+    askConfirm("Delete this cycle count?","This removes the historical record. Any stock adjustments it already posted will remain on the Adjustment log.", ()=>{
+      db.ccSessions = db.ccSessions.filter(s=>s.id!==id);
+      ccSelected.delete(id);
+      saveModule("ccSessions");
+      renderCycleCount();
+      toast("Cycle count deleted");
+    });
+  }));
+  el.querySelectorAll(".cc-row-check").forEach(cb=>cb.addEventListener("change", (e)=>{
+    const id = parseInt(e.target.dataset.id);
+    if(e.target.checked) ccSelected.add(id); else ccSelected.delete(id);
+    updateCcBulkBar();
+  }));
+  document.getElementById("ccSelectAll").addEventListener("change", (e)=>{
+    completed.forEach(s => e.target.checked ? ccSelected.add(s.id) : ccSelected.delete(s.id));
+    renderCycleCount();
+  });
+  document.getElementById("btnClearCcSelection").addEventListener("click", ()=>{
+    ccSelected.clear();
+    renderCycleCount();
+  });
+  document.getElementById("btnDeleteSelectedCC").addEventListener("click", ()=>{
+    const count = ccSelected.size;
+    if(count===0) return;
+    askConfirm(`Delete ${count} cycle count(s)?`, "This removes the historical records. Any stock adjustments they already posted will remain on the Adjustment log.", ()=>{
+      db.ccSessions = db.ccSessions.filter(s=>!ccSelected.has(s.id));
+      ccSelected.clear();
+      saveModule("ccSessions");
+      renderCycleCount();
+      toast(`${count} cycle count(s) deleted`);
+    });
+  });
+  updateCcBulkBar();
+}
+function updateCcBulkBar(){
+  const bar = document.getElementById("ccBulkBar");
+  if(!bar) return;
+  const count = ccSelected.size;
+  bar.classList.toggle("open", count>0);
+  const countEl = document.getElementById("ccSelectedCount");
+  if(countEl) countEl.textContent = count;
+  const selectAll = document.getElementById("ccSelectAll");
+  if(selectAll){
+    const rows = scopedCcSessions().filter(s=>s.status==="completed");
+    const allSelected = rows.length>0 && rows.every(s=>ccSelected.has(s.id));
+    const someSelected = rows.some(s=>ccSelected.has(s.id));
+    selectAll.checked = allSelected;
+    selectAll.indeterminate = someSelected && !allSelected;
+  }
 }
 /* Turns a just-completed Cycle Count session's non-matching lines into
    posted Stock Adjustment records (see db.adjustments / the Adjustment
@@ -5011,14 +5077,18 @@ function renderOverallCycleCountDashboard(){
         <thead><tr><th>Site</th><th>Date</th><th>SKUs Counted</th><th>Accuracy Rate</th><th>Damaged Rate</th><th>Unrecorded Rate</th><th></th></tr></thead>
         <tbody>${allCompleted.length ? allCompleted.map(s=>{
           const st = computeSessionStats(s);
+          const orphaned = !siteObj(s.site);
           return `<tr>
-            <td><span class="pill">${esc(siteName(s.site))}</span></td>
+            <td><span class="pill" ${orphaned?'style="color:var(--none);"':''}>${esc(siteName(s.site))}</span>${orphaned?` <span style="font-size:10.5px;color:var(--text-faint);">(site deleted)</span>`:""}</td>
             <td class="mono">${s.date}</td>
             <td class="mono">${st.total}</td>
             <td class="mono" style="color:var(--good);font-weight:700;">${st.accuracyRate.toFixed(1)}%</td>
             <td class="mono" style="color:var(--critical);">${st.damagedRate.toFixed(1)}%</td>
             <td class="mono" style="color:var(--none);">${st.unrecordedRate.toFixed(1)}%</td>
-            <td><button class="btn btn-sm" data-view="${s.id}">View</button></td>
+            <td style="white-space:nowrap;">
+              <button class="btn btn-sm" data-view="${s.id}">View</button>
+              <button class="icon-btn" data-del-overall="${s.id}" title="Delete">${icon("trash")}</button>
+            </td>
           </tr>`;
         }).join("") : `<tr><td colspan="7" style="color:var(--text-faint)">No completed cycle counts yet across any site.</td></tr>`}</tbody>
       </table>
@@ -5031,6 +5101,20 @@ function renderOverallCycleCountDashboard(){
     goTo("cyclecount");
   }));
   el.querySelectorAll("[data-view]").forEach(b=>b.addEventListener("click", ()=>{ ccViewSessionId=parseInt(b.dataset.view); renderCycleCount(); }));
+  el.querySelectorAll("[data-del-overall]").forEach(b=>b.addEventListener("click", ()=>{
+    const id = parseInt(b.dataset.delOverall);
+    const s = db.ccSessions.find(x=>x.id===id);
+    const orphaned = s && !siteObj(s.site);
+    askConfirm("Delete this cycle count?", orphaned
+      ? "This cycle count belongs to a site that no longer exists. Deleting it removes the orphaned historical record. Any stock adjustments it already posted will remain on the Adjustment log."
+      : "This removes the historical record. Any stock adjustments it already posted will remain on the Adjustment log.", ()=>{
+      db.ccSessions = db.ccSessions.filter(x=>x.id!==id);
+      ccSelected.delete(id);
+      saveModule("ccSessions");
+      renderOverallCycleCountDashboard();
+      toast("Cycle count deleted");
+    });
+  }));
 }
 function renderActiveSession(session){
   const el = document.getElementById("content");
