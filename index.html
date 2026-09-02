@@ -511,6 +511,38 @@ tbody tr:hover{background:var(--surface2);}
   </div>
 </div>
 
+<div class="modal-backdrop" id="tfReceiveBackdrop">
+  <div class="modal">
+    <h4>Confirm Transfer Receipt</h4>
+    <p id="tfReceiveBody">Did you receive the full quantity in good order?</p>
+    <div class="form-actions">
+      <button class="btn btn-accent" id="tfReceiveCompleteBtn">Approve</button>
+      <button class="btn" id="tfReceiveNotCompleteBtn">Not Complete</button>
+      <button class="btn btn-ghost" id="tfReceiveCancelBtn">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-backdrop" id="tfPartialBackdrop">
+  <div class="modal">
+    <h4>Receipt Discrepancy</h4>
+    <p id="tfPartialBody">Enter the actual quantity received and a remark explaining the difference.</p>
+    <div class="field" style="margin-bottom:10px;">
+      <label>Actual Quantity Received</label>
+      <input id="f_tf_partial_qty" type="number" min="0" placeholder="0">
+    </div>
+    <div class="field">
+      <label>Remarks / Notes</label>
+      <textarea id="f_tf_partial_notes" rows="3" placeholder="e.g. 2 units damaged in transit, 1 unit missing"></textarea>
+    </div>
+    <div class="field-note" id="tfPartialError" style="color:var(--none);"></div>
+    <div class="form-actions">
+      <button class="btn btn-accent" id="tfPartialSaveBtn">Save &amp; Mark Received</button>
+      <button class="btn btn-ghost" id="tfPartialCancelBtn">Cancel</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal-backdrop" id="skuQrBackdrop">
   <div class="modal" style="max-width:320px;text-align:center;">
     <h4 id="skuQrTitle">QR Code</h4>
@@ -575,7 +607,12 @@ const SIZES = ["All Sizes","6-Wheeler","10-Wheeler","Trailer","Light Truck"];
 const UOMS = ["Piece","Set","Box","Liter","Pair","Roll"];
 const ROLES = ["Admin","Warehouse Staff","Procurement","Viewer","Requestor","Approver"];
 const ROSTER_ROLES = ["Receiver","Released By","Requestor","Approver","Transferred By","Handover To"];
-const CC_REMARKS = ["Matched","Damaged","Unrecorded (Extra)","Missing/Shortage","Other"];
+const CC_REMARKS = ["Matched","Issued but not deducted","Transferred but not recorded","Stored in another location","Damaged/scrapped without documentation","Unexplained/Missing","Damaged","Unrecorded (Extra)","Missing/Shortage","Other"];
+/* The fixed set of admin-selectable discrepancy tags shown on the Cycle
+   Count Review screen (initial review and after a 2nd blind count).
+   "Matched" isn't offered here — it's assigned automatically when the
+   counted qty equals the frozen system qty, no tag needed. */
+const CC_TAG_OPTIONS = ["Issued but not deducted","Transferred but not recorded","Stored in another location","Damaged/scrapped without documentation","Unexplained/Missing"];
 const REQUEST_CATEGORIES = ["PMS","Repair"];
 
 let db = {
@@ -656,12 +693,12 @@ let db = {
     ]},
   ],
   /* Stock Adjustments — auto-posted whenever a Cycle Count session is
-     completed with a variance (see generateAdjustmentsFromSession /
-     the "Complete Count" handler). These are what actually correct
+     approved by an Admin with a variance (see generateAdjustmentsFromSession /
+     the approveCycleCount() handler). These are what actually correct
      on-hand quantity going forward (see onHand()); the module itself
      is a read-only audit trail. The three rows below correspond 1:1 to
      the non-matched lines in ccSessions #1 above, as if that session
-     had been completed through this flow. */
+     had been approved through this flow. */
   adjustments: [
     {id:1,date:"2026-06-30",site:1,sku:"BRK-001",sessionId:1,systemQty:16,countedQty:15,variance:-1,remark:"Damaged",notes:"1 pc damaged, disposed",adjustedBy:"Pedro Reyes / Maria Santos"},
     {id:2,date:"2026-06-30",site:1,sku:"TIR-003",sessionId:1,systemQty:8,countedQty:9,variance:1,remark:"Unrecorded (Extra)",notes:"1 extra unit found, unlogged return",adjustedBy:"Pedro Reyes / Maria Santos"},
@@ -1252,9 +1289,16 @@ function scopedAdjustments(){ return isOverall() ? db.adjustments : db.adjustmen
    truth other renderers read through, so the wording and stock impact
    stay consistent everywhere. */
 function isTransferReceived(t){ return t.status==="received"; }
+/* When a transfer is received "Not Complete" (actual quantity received
+   differs from what was dispatched), t.receivedQty holds the confirmed
+   actual quantity and t.receivedRemarks the reason. This is what actually
+   lands in the To Site's on-hand — see onHand()/onHandAtSite() — while
+   t.qty (the dispatched amount) is still what left the From Site. */
+function transferReceivedQty(t){ return (t.receivedQty!=null && t.receivedQty!=="") ? Number(t.receivedQty) : Number(t.qty); }
+function hasTransferDiscrepancy(t){ return isTransferReceived(t) && t.receivedQty!=null && t.receivedQty!=="" && Number(t.receivedQty)!==Number(t.qty); }
 function transferStatusLabel(t, perspectiveSite){
   const atToSite = perspectiveSite!=null && String(perspectiveSite)===String(t.toSite);
-  if(isTransferReceived(t)) return "Received";
+  if(isTransferReceived(t)) return hasTransferDiscrepancy(t) ? "Received (Discrepancy)" : "Received";
   return atToSite ? "For Receive" : "In-Transit";
 }
 
@@ -1301,9 +1345,10 @@ function buildTransferNotifications(){
     const fromMine = mySites!=null && mySites.includes(String(t.fromSite));
     if(mySites!=null && !toMine && !fromMine) return;
     const received = isTransferReceived(t);
+    const discrepancy = hasTransferDiscrepancy(t);
     let title, tone;
     if(received){
-      title = "Transfer Received"; tone = "good";
+      title = discrepancy ? "Transfer Received — Discrepancy" : "Transfer Received"; tone = discrepancy ? "critical" : "good";
     } else if(toMine){
       title = "Transfer — For Receive"; tone = "critical";
     } else if(fromMine){
@@ -1312,7 +1357,9 @@ function buildTransferNotifications(){
       // Overall account viewing a transfer that isn't received yet
       title = "Transfer — In-Transit / For Receive"; tone = "critical";
     }
-    const msg = `${fmtInt(t.qty)} × ${esc(skuName(t.sku))} — ${esc(siteName(t.fromSite))} → ${esc(siteName(t.toSite))}`;
+    const msg = discrepancy
+      ? `${fmtInt(transferReceivedQty(t))} of ${fmtInt(t.qty)} × ${esc(skuName(t.sku))} confirmed — ${esc(siteName(t.fromSite))} → ${esc(siteName(t.toSite))}`
+      : `${fmtInt(t.qty)} × ${esc(skuName(t.sku))} — ${esc(siteName(t.fromSite))} → ${esc(siteName(t.toSite))}`;
     out.push({
       key: `transfer-${t.id}-${received?"received":"pending"}`,
       tone, iconName:"transfer", title, message: msg,
@@ -1330,9 +1377,12 @@ function buildCycleCountNotifications(){
     if(mySites!=null && !mySites.includes(String(s.site))) return;
     out.push({
       key: `cyclecount-${s.id}`,
-      tone:"accent", iconName:"check", title:"Cycle Count Created",
-      message:`New cycle count started at ${esc(siteName(s.site))}${s.status==="completed"?" — now completed":""}`,
-      timestamp: s.createdAt || s.date,
+      tone: s.status==="pending-review" ? "critical" : "accent", iconName:"check",
+      title: s.status==="pending-review" ? "Cycle Count — Pending Admin Review" : "Cycle Count Created",
+      message: s.status==="pending-review"
+        ? `Cycle count at ${esc(siteName(s.site))} was submitted and needs Admin review before it's finalized.`
+        : `New cycle count started at ${esc(siteName(s.site))}${s.status==="completed"?" — now completed":""}`,
+      timestamp: s.status==="pending-review" ? (s.submittedAt||s.createdAt||s.date) : (s.createdAt || s.date),
       onOpen: ()=>{ if(mySites==null) currentSite = s.site; else if(!mySites.includes(String(currentSite))) currentSite = s.site; goTo("cyclecount"); },
     });
   });
@@ -1430,17 +1480,61 @@ function onHand(skuId){
   const rec = scopedReceiving().filter(r=>r.sku===skuId).reduce((a,r)=>a+Number(r.qty),0);
   const wd  = scopedWithdrawals().filter(w=>w.sku===skuId).reduce((a,w)=>a+Number(w.qty),0);
   const adj = scopedAdjustments().filter(a=>a.sku===skuId).reduce((a,x)=>a+Number(x.variance),0);
-  const tIn = scopedTransfersIn().filter(t=>t.sku===skuId).reduce((a,t)=>a+Number(t.qty),0);
+  const tIn = scopedTransfersIn().filter(t=>t.sku===skuId).reduce((a,t)=>a+transferReceivedQty(t),0);
   const tOut = scopedTransfersOut().filter(t=>t.sku===skuId).reduce((a,t)=>a+Number(t.qty),0);
   const retIn = scopedReturns().filter(r=>r.sku===skuId && r.type==="Unused Return").reduce((a,r)=>a+Number(r.qty),0);
   const retOut = scopedReturns().filter(r=>r.sku===skuId && r.type==="Wrong Delivery").reduce((a,r)=>a+Number(r.qty),0);
   return rec - wd + adj + tIn - tOut + retIn - retOut;
+}
+/* Most recent Receiving entry for a SKU (scoped to the current site
+   selector, same as onHand()) — ordered by logged-at timestamp first
+   (falls back to date), and by record id as the final tiebreaker so
+   same-day/same-timestamp entries still resolve to whichever was
+   actually entered last. This is what "latest batch" means throughout
+   the SKU Catalog's Cost/pc column below. */
+function latestReceivingRecord(skuId){
+  const recs = scopedReceiving().filter(r=>r.sku===skuId);
+  if(!recs.length) return null;
+  return [...recs].sort((a,b)=>
+    String(a.timestamp||a.date).localeCompare(String(b.timestamp||b.date)) || (a.id-b.id)
+  ).pop();
+}
+/* Cost/pc shown on the SKU Catalog is the cost from the latest Receiving
+   entry (latest batch) for that SKU, not the manually-entered catalog
+   cost — that catalog field (SKU.cost) is only a fallback default for
+   SKUs that have never actually been received yet, and for pre-filling
+   new Receiving/Withdrawal/Transfer/Return forms. */
+function displaySkuCost(skuId){
+  const latest = latestReceivingRecord(skuId);
+  if(latest) return Number(latest.cost)||0;
+  const s = skuObj(skuId);
+  return s ? Number(s.cost)||0 : 0;
 }
 /* A SKU with zero/negative on-hand only counts as "No Stock" if it has
    actually been received or withdrawn before — a brand-new SKU that was
    never received or withdrawn simply has no activity yet, not depleted stock. */
 function hasStockActivity(skuId){
   return scopedReceiving().some(r=>r.sku===skuId) || scopedWithdrawals().some(w=>w.sku===skuId);
+}
+/* Broader "any transaction at all" check for a SKU at the current site —
+   covers receiving, withdrawals, returns, adjustments, and transfers
+   in/out, not just receiving/withdrawal like hasStockActivity() above.
+   Used to decide whether a zero-on-hand SKU still belongs on a Cycle
+   Count (e.g. a SKU that arrived only via a site-to-site transfer). */
+function hasAnyTransactionAtCurrentSite(skuId){
+  return scopedReceiving().some(r=>r.sku===skuId) ||
+    scopedWithdrawals().some(w=>w.sku===skuId) ||
+    scopedReturns().some(r=>r.sku===skuId) ||
+    scopedAdjustments().some(a=>a.sku===skuId) ||
+    scopedTransfersIn().some(t=>t.sku===skuId) ||
+    scopedTransfersOut().some(t=>t.sku===skuId);
+}
+/* Eligibility rule for the Cycle Count list: a SKU is included if it
+   currently has stock on hand (above zero) OR it has some transaction
+   history at this site. A SKU that's never moved and sits at zero has
+   nothing to physically count, so it's left off the list entirely. */
+function isEligibleForCycleCount(skuId){
+  return onHand(skuId) > 0 || hasAnyTransactionAtCurrentSite(skuId);
 }
 /* On-hand at one specific site, independent of the current site selector —
    used by the Transfer form to check availability at the chosen From Site
@@ -1450,7 +1544,7 @@ function onHandAtSite(skuId, siteId, excludeTransferId){
   const wd  = db.withdrawals.filter(w=>w.sku===skuId && String(w.site)===String(siteId)).reduce((a,w)=>a+Number(w.qty),0);
   const adj = db.adjustments.filter(a=>a.sku===skuId && String(a.site)===String(siteId)).reduce((a,x)=>a+Number(x.variance),0);
   const transfers = excludeTransferId ? db.transfers.filter(t=>t.id!==excludeTransferId) : db.transfers;
-  const tIn = transfers.filter(t=>t.sku===skuId && String(t.toSite)===String(siteId) && isTransferReceived(t)).reduce((a,t)=>a+Number(t.qty),0);
+  const tIn = transfers.filter(t=>t.sku===skuId && String(t.toSite)===String(siteId) && isTransferReceived(t)).reduce((a,t)=>a+transferReceivedQty(t),0);
   const tOut = transfers.filter(t=>t.sku===skuId && String(t.fromSite)===String(siteId)).reduce((a,t)=>a+Number(t.qty),0);
   const retIn = db.returns.filter(r=>r.sku===skuId && String(r.site)===String(siteId) && r.type==="Unused Return").reduce((a,r)=>a+Number(r.qty),0);
   const retOut = db.returns.filter(r=>r.sku===skuId && String(r.site)===String(siteId) && r.type==="Wrong Delivery").reduce((a,r)=>a+Number(r.qty),0);
@@ -1471,7 +1565,15 @@ function badge(status){
   return `<span class="badge badge-${status.cls}">${status.label}</span>`;
 }
 function badgeRemark(remark){
-  const map = {"Matched":"good","Damaged":"critical","Unrecorded (Extra)":"none","Missing/Shortage":"none","Other":"role"};
+  const map = {
+    "Matched":"good",
+    "Damaged":"critical","Unrecorded (Extra)":"none","Missing/Shortage":"none","Other":"role",
+    "Issued but not deducted":"critical",
+    "Transferred but not recorded":"critical",
+    "Stored in another location":"role",
+    "Damaged/scrapped without documentation":"none",
+    "Unexplained/Missing":"none",
+  };
   const cls = map[remark]||"role";
   return `<span class="badge badge-${cls}">${esc(remark||"—")}</span>`;
 }
@@ -1532,6 +1634,85 @@ document.getElementById("reviewNo").addEventListener("click", ()=>{
   toast("Back to the form — make your corrections");
 });
 
+/* ===== Transfer receipt confirmation (Approve / Not Complete) =====
+   Confirming receipt of a transfer is a two-step decision, not a plain
+   yes/no: the receiving site must say whether the shipment arrived
+   Approve (full dispatched quantity, in good order) or Not Complete.
+   Choosing Not Complete opens a second prompt requiring the actual
+   quantity received plus a remark, so any shortage/damage is captured
+   on the record rather than silently rounded down or lost. */
+let tfReceiveTargetId = null;
+function openTfReceiveConfirm(id){
+  const t = db.transfers.find(x=>x.id===id);
+  if(!t) return;
+  tfReceiveTargetId = id;
+  document.getElementById("tfReceiveBody").textContent =
+    `Confirming receipt of ${fmtInt(t.qty)} unit(s) of ${t.sku} — ${skuName(t.sku)} at ${siteName(t.toSite)}. Was the full quantity received in good order?`;
+  document.getElementById("tfReceiveBackdrop").classList.add("open");
+}
+function closeTfReceiveConfirm(){
+  document.getElementById("tfReceiveBackdrop").classList.remove("open");
+  tfReceiveTargetId = null;
+}
+function commitTransferReceipt(id, receivedQty, receivedRemarks){
+  const t = db.transfers.find(x=>x.id===id);
+  if(!t) return;
+  t.status = "received";
+  t.receivedDate = todayStr();
+  if(receivedQty!=null){
+    t.receivedQty = receivedQty;
+    t.receivedRemarks = receivedRemarks || "";
+  } else {
+    t.receivedQty = null;
+    t.receivedRemarks = "";
+  }
+  saveModule("transfers");
+  if(typeof renderTfTable==="function") renderTfTable();
+  renderNotifBell();
+  toast(hasTransferDiscrepancy(t)
+    ? `Transfer marked Received with a discrepancy — ${fmtInt(receivedQty)} of ${fmtInt(t.qty)} unit(s) confirmed`
+    : "Transfer marked as Received");
+}
+document.getElementById("tfReceiveCompleteBtn").addEventListener("click", ()=>{
+  if(!tfReceiveTargetId) return;
+  const id = tfReceiveTargetId;
+  closeTfReceiveConfirm();
+  commitTransferReceipt(id, null, null);
+});
+document.getElementById("tfReceiveNotCompleteBtn").addEventListener("click", ()=>{
+  if(!tfReceiveTargetId) return;
+  const t = db.transfers.find(x=>x.id===tfReceiveTargetId);
+  document.getElementById("tfReceiveBackdrop").classList.remove("open");
+  document.getElementById("tfPartialBody").textContent =
+    `Dispatched quantity was ${fmtInt(t.qty)} unit(s) of ${t.sku} — ${skuName(t.sku)}. Enter what was actually received.`;
+  document.getElementById("f_tf_partial_qty").value = t.qty;
+  document.getElementById("f_tf_partial_notes").value = "";
+  document.getElementById("tfPartialError").textContent = "";
+  document.getElementById("tfPartialBackdrop").classList.add("open");
+});
+document.getElementById("tfReceiveCancelBtn").addEventListener("click", closeTfReceiveConfirm);
+document.getElementById("tfReceiveBackdrop").addEventListener("click", (e)=>{ if(e.target.id==="tfReceiveBackdrop") closeTfReceiveConfirm(); });
+document.getElementById("tfPartialCancelBtn").addEventListener("click", ()=>{
+  document.getElementById("tfPartialBackdrop").classList.remove("open");
+  tfReceiveTargetId = null;
+});
+document.getElementById("tfPartialBackdrop").addEventListener("click", (e)=>{
+  if(e.target.id==="tfPartialBackdrop"){ document.getElementById("tfPartialBackdrop").classList.remove("open"); tfReceiveTargetId = null; }
+});
+document.getElementById("tfPartialSaveBtn").addEventListener("click", ()=>{
+  if(!tfReceiveTargetId) return;
+  const qtyRaw = document.getElementById("f_tf_partial_qty").value;
+  const notes = document.getElementById("f_tf_partial_notes").value.trim();
+  const errEl = document.getElementById("tfPartialError");
+  const qty = parseInt(qtyRaw);
+  if(qtyRaw==="" || isNaN(qty) || qty<0){ errEl.textContent = "Enter a valid actual quantity received (0 or more)."; return; }
+  if(!notes){ errEl.textContent = "A remark or note is required to explain the discrepancy."; return; }
+  const id = tfReceiveTargetId;
+  document.getElementById("tfPartialBackdrop").classList.remove("open");
+  tfReceiveTargetId = null;
+  commitTransferReceipt(id, qty, notes);
+});
+
 function optionList(arr, selected){
   return arr.map(v=>`<option value="${esc(v)}" ${v===selected?'selected':''}>${esc(v)}</option>`).join("");
 }
@@ -1552,6 +1733,22 @@ function skuOptionList(selected, category){
    in sync with what the SKU Catalog itself actually shows. */
 function skuCategoriesInUse(){
   return [...new Set(db.skus.map(s=>s.category).filter(Boolean))].sort((a,b)=>a.localeCompare(b));
+}
+/* Truck User values actually present on SKUs in the Catalog right now —
+   used to populate the Cycle Count's "Truck User" filter so it only
+   offers options that would actually narrow the list. The filter groups
+   by the first word of the Truck User text (e.g. "Isuzu 10-Wheeler" and
+   "Isuzu 6-Wheeler" both roll up under "Isuzu"), since that's typically
+   the brand and staff want to filter per-brand rather than per exact
+   spec. truckUserFirstWord() is the single place that grouping rule
+   lives, so the dropdown options and the actual filtering always agree. */
+function truckUserFirstWord(truckUser){
+  const s = (truckUser||"").trim();
+  if(!s) return "";
+  return s.split(/\s+/)[0];
+}
+function truckUsersInUse(){
+  return [...new Set(db.skus.map(s=>truckUserFirstWord(s.truckUser)).filter(Boolean))].sort((a,b)=>a.localeCompare(b));
 }
 function rosterOptionList(role, selected){
   const people = db.roster.filter(r=>r.roles.includes(role));
@@ -1711,6 +1908,59 @@ const DASH_DATE_FILTERS = [
 ];
 function pad2(n){ return String(n).padStart(2,"0"); }
 function fmtDateLocal(d){ return `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}`; }
+/* ===== Generic quick date-range filter =====
+   Shared by any module's "Today / Yesterday / Last Week / Last Month /
+   Custom" filter (Receiving, Withdrawal, etc). Returns {from,to} as
+   YYYY-MM-DD strings (either can be "" meaning unbounded). */
+const QUICK_DATE_FILTERS = [
+  {key:"all", label:"All Time"},
+  {key:"today", label:"Today"},
+  {key:"yesterday", label:"Yesterday"},
+  {key:"lastweek", label:"Last Week"},
+  {key:"lastmonth", label:"Last Month"},
+  {key:"custom", label:"Custom"},
+];
+function computeQuickDateRange(filterKey, customFrom, customTo){
+  const today = new Date();
+  if(filterKey==="today"){
+    return {from: fmtDateLocal(today), to: fmtDateLocal(today)};
+  }
+  if(filterKey==="yesterday"){
+    const y = new Date(today); y.setDate(y.getDate()-1);
+    return {from: fmtDateLocal(y), to: fmtDateLocal(y)};
+  }
+  if(filterKey==="lastweek"){
+    const from = new Date(today); from.setDate(from.getDate()-6);
+    return {from: fmtDateLocal(from), to: fmtDateLocal(today)};
+  }
+  if(filterKey==="lastmonth"){
+    const from = new Date(today); from.setDate(from.getDate()-29);
+    return {from: fmtDateLocal(from), to: fmtDateLocal(today)};
+  }
+  if(filterKey==="custom"){
+    return {from: customFrom||"", to: customTo||""};
+  }
+  return {from:"", to:""};
+}
+function quickDateInRange(dateStr, filterKey, customFrom, customTo){
+  const {from,to} = computeQuickDateRange(filterKey, customFrom, customTo);
+  if(from && dateStr < from) return false;
+  if(to && dateStr > to) return false;
+  return true;
+}
+/* Renders the filter <select> + (conditionally) the custom From/To date
+   inputs as a toolbar fragment. `idPrefix` namespaces the element ids
+   per-module (e.g. "rec", "wd") so multiple such filters can coexist. */
+function quickDateFilterHtml(idPrefix, currentFilter, customFrom, customTo){
+  return `
+    <select class="select-filter" id="${idPrefix}DateFilterSelect" style="max-width:150px;">${optionList(QUICK_DATE_FILTERS.map(f=>f.label), QUICK_DATE_FILTERS.find(f=>f.key===currentFilter)?.label)}</select>
+    ${currentFilter==="custom" ? `
+      <input type="date" id="${idPrefix}CustomFrom" value="${customFrom}">
+      <span style="color:var(--text-faint);">to</span>
+      <input type="date" id="${idPrefix}CustomTo" value="${customTo}">
+    ` : ""}
+  `;
+}
 function dashDateRange(){
   const today = new Date();
   if(dashDateFilter==="yesterday"){
@@ -2092,7 +2342,7 @@ ENG-045,Air Filter,Filters,Piece,320,All Brands All Sizes,30"></textarea>
       <table>
         <thead><tr>
           <th style="width:34px;"><input type="checkbox" id="skuSelectAll" title="Select all"></th>
-          <th>SKU #</th><th>Name</th><th>Category</th><th>UoM</th><th>Cost/pc</th><th>Truck User</th><th>Reorder Qty</th><th>On Hand</th><th>Status</th><th></th>
+          <th>SKU #</th><th>Name</th><th>Category</th><th>UoM</th><th title="Cost from the latest received batch — falls back to the catalog cost if never received">Cost/pc</th><th>Truck User</th><th>Reorder Qty</th><th>On Hand</th><th>Status</th><th></th>
         </tr></thead>
         <tbody id="skuTbody"></tbody>
       </table>
@@ -2187,13 +2437,18 @@ function renderSkuTable(){
   }
   tbody.innerHTML = rows.map(s=>{
     const st = stockStatus(s.id);
+    const latestRec = latestReceivingRecord(s.id);
+    const cost = displaySkuCost(s.id);
+    const costTitle = latestRec
+      ? `Latest cost from batch ${latestRec.batch||"—"}, received ${latestRec.date}${isOverall()?"":` at ${esc(siteName(latestRec.site))}`}`
+      : `No receiving history yet — showing catalog cost`;
     return `<tr>
       <td><input type="checkbox" class="sku-row-check" data-id="${esc(s.id)}" ${skuSelected.has(s.id)?"checked":""}></td>
       <td class="mono">${esc(s.id)}</td>
       <td>${esc(s.name)}</td>
       <td><span class="pill">${esc(s.category)}</span></td>
       <td>${esc(s.uom)}</td>
-      <td class="mono">${fmtMoney(s.cost)}</td>
+      <td class="mono" title="${esc(costTitle)}">${fmtMoney(cost)}${latestRec ? ` <span style="color:var(--text-faint);font-size:10px;">(${esc(latestRec.batch)||"—"})</span>` : ""}</td>
       <td>${esc(s.truckUser||"")}</td>
       <td class="mono">${fmtInt(s.reorder)}</td>
       <td class="mono">${fmtInt(st.qty)}</td>
@@ -2783,6 +3038,24 @@ function commitBulkSku(rows){
    ============================================================ */
 let receivingEditId = null;
 let recSelected = new Set();
+let recSearch = "";
+let recDateFilter = "all";
+let recCustomFrom = "";
+let recCustomTo = "";
+function filteredReceiving(){
+  const q = recSearch.trim().toLowerCase();
+  let rows = scopedReceiving();
+  if(recDateFilter!=="all") rows = rows.filter(r=>quickDateInRange(r.date, recDateFilter, recCustomFrom, recCustomTo));
+  if(!q) return rows;
+  return rows.filter(r =>
+    String(r.sku||"").toLowerCase().includes(q) ||
+    skuName(r.sku).toLowerCase().includes(q) ||
+    String(r.supplier||"").toLowerCase().includes(q) ||
+    String(r.po||"").toLowerCase().includes(q) ||
+    String(r.batch||"").toLowerCase().includes(q) ||
+    String(r.receiver||"").toLowerCase().includes(q)
+  );
+}
 function renderReceiving(){
   const el = document.getElementById("content");
   el.innerHTML = `
@@ -2791,6 +3064,9 @@ function renderReceiving(){
       <button class="btn" id="btnScanToReceive">${icon("qrcode")} Scan to Receive</button>
       <button class="btn" id="btnBulkRec">${icon("file")} Bulk Upload</button>
       <button class="btn" id="btnPrintAllBatchQr">${icon("qrcode")} Print Batch QR Labels</button>
+      <div class="spacer"></div>
+      ${quickDateFilterHtml("rec", recDateFilter, recCustomFrom, recCustomTo)}
+      <div class="search-box">${icon("search")}<input id="recSearchInput" placeholder="Search SKU, name, supplier, PO #, or batch #..." value="${esc(recSearch)}"></div>
     </div>
 
     <div class="bulk-bar" id="recBulkBar">
@@ -2811,6 +3087,7 @@ function renderReceiving(){
       <div class="form-grid">
         <div class="field"><label>Site</label><select id="f_rec_site">${siteOptionList()}</select></div>
         <div class="field"><label>Supplier</label><input id="f_rec_supplier" placeholder="Supplier name" list="supplierNamesList" autocomplete="off"><datalist id="supplierNamesList">${supplierDatalistOptions()}</datalist></div>
+        <div class="field"><label>PO Number</label><input id="f_rec_po" placeholder="e.g. PO-2607-014"></div>
         <div class="field"><label>SKU</label><select id="f_rec_sku">${skuOptionList()}</select></div>
         <div class="field">
           <label>Quantity</label>
@@ -2842,7 +3119,7 @@ function renderReceiving(){
     <div class="form-panel" id="recBulkFormPanel">
       <div class="section-head" style="margin-bottom:12px;">
         <h3 style="font-size:16px;">Bulk Upload Receiving Entries</h3>
-        <p>One entry per line: Site, Supplier, SKU #, Quantity, Cost per Unit, Delivery Date, Batch Number, Receiver</p>
+        <p>One entry per line: Site, Supplier, PO Number, SKU #, Quantity, Cost per Unit, Delivery Date, Batch Number, Receiver</p>
       </div>
       <div class="field">
         <label>Upload a CSV file</label>
@@ -2851,9 +3128,9 @@ function renderReceiving(){
       </div>
       <div class="field">
         <label>...or paste rows directly</label>
-        <textarea id="recBulkText" rows="7" placeholder="Main Yard — Cabuyao,ABC Auto Parts,BRK-020,20,410,2026-07-27,BR-2607-A,Juan Dela Cruz
-MYC,XYZ Supply,ENG-045,50,320,2026-07-28,,"></textarea>
-        <div class="field-note">Site accepts the full site name or its short code — leave blank to use the currently selected site. SKU # must already exist in the SKU Catalog. Cost, Delivery Date, and Receiver are optional. Batch Number is optional too — leave it blank to have one generated automatically for each row. Blank lines are ignored.</div>
+        <textarea id="recBulkText" rows="7" placeholder="Main Yard — Cabuyao,ABC Auto Parts,PO-2607-014,BRK-020,20,410,2026-07-27,BR-2607-A,Juan Dela Cruz
+MYC,XYZ Supply,,ENG-045,50,320,2026-07-28,,"></textarea>
+        <div class="field-note">Site accepts the full site name or its short code — leave blank to use the currently selected site. SKU # must already exist in the SKU Catalog. PO Number, Cost, Delivery Date, and Receiver are optional. Batch Number is optional too — leave it blank to have one generated automatically for each row. Blank lines are ignored.</div>
       </div>
       <div id="recBulkParseError" class="field-note" style="color:var(--none);"></div>
       <div class="form-actions">
@@ -2865,7 +3142,7 @@ MYC,XYZ Supply,ENG-045,50,320,2026-07-28,,"></textarea>
 
     <div class="table-wrap">
       <table>
-        <thead><tr><th style="width:34px;"><input type="checkbox" id="recSelectAll" title="Select all"></th><th>Site</th><th>Date</th><th>Logged At</th><th>Supplier</th><th>SKU</th><th>Qty</th><th>Cost/Unit</th><th>Delivery</th><th>Batch #</th><th>Receiver</th><th></th></tr></thead>
+        <thead><tr><th style="width:34px;"><input type="checkbox" id="recSelectAll" title="Select all"></th><th>Site</th><th>Date</th><th>Logged At</th><th>Supplier</th><th>PO #</th><th>SKU #</th><th>SKU Name</th><th>Qty</th><th>Cost/Unit</th><th>Delivery</th><th>Batch #</th><th>Receiver</th><th></th></tr></thead>
         <tbody id="recTbody"></tbody>
       </table>
     </div>
@@ -2892,8 +3169,8 @@ MYC,XYZ Supply,ENG-045,50,320,2026-07-28,,"></textarea>
   document.getElementById("btnCancelBulkRec").addEventListener("click", ()=>document.getElementById("recBulkFormPanel").classList.remove("open"));
   document.getElementById("btnParseBulkRec").addEventListener("click", reviewBulkRec);
   document.getElementById("btnTemplateRec").addEventListener("click", ()=>{
-    downloadCSV("receiving_template.csv", ["Site","Supplier","SKU#","Quantity","CostPerUnit","DeliveryDate","BatchNumber","Receiver"],
-      [[activeSites()[0]?.name || "Main Yard — Cabuyao", "ABC Auto Parts", db.skus[0]?.id || "BRK-020", "20", "410", todayStr(), "", ""]]);
+    downloadCSV("receiving_template.csv", ["Site","Supplier","PONumber","SKU#","Quantity","CostPerUnit","DeliveryDate","BatchNumber","Receiver"],
+      [[activeSites()[0]?.name || "Main Yard — Cabuyao", "ABC Auto Parts", "PO-2607-014", db.skus[0]?.id || "BRK-020", "20", "410", todayStr(), "", ""]]);
   });
   document.getElementById("recBulkFile").addEventListener("change", (e)=>{
     const file = e.target.files[0];
@@ -2914,8 +3191,19 @@ MYC,XYZ Supply,ENG-045,50,320,2026-07-28,,"></textarea>
     if(recSelected.size===0){ toast("Select at least one entry first"); return; }
     printRecQrLabels(Array.from(recSelected));
   });
+  document.getElementById("recSearchInput").addEventListener("input", (e)=>{ recSearch = e.target.value; renderRecTable(); });
+  document.getElementById("recDateFilterSelect").addEventListener("change", (e)=>{
+    const picked = QUICK_DATE_FILTERS.find(f=>f.label===e.target.value);
+    recDateFilter = picked ? picked.key : "all";
+    if(recDateFilter==="custom" && !recCustomTo) recCustomTo = fmtDateLocal(new Date());
+    renderReceiving();
+  });
+  const recFromEl = document.getElementById("recCustomFrom");
+  const recToEl = document.getElementById("recCustomTo");
+  if(recFromEl) recFromEl.addEventListener("change", (e)=>{ recCustomFrom = e.target.value; renderRecTable(); });
+  if(recToEl) recToEl.addEventListener("change", (e)=>{ recCustomTo = e.target.value; renderRecTable(); });
   document.getElementById("recSelectAll").addEventListener("change", (e)=>{
-    scopedReceiving().forEach(r => e.target.checked ? recSelected.add(r.id) : recSelected.delete(r.id));
+    filteredReceiving().forEach(r => e.target.checked ? recSelected.add(r.id) : recSelected.delete(r.id));
     renderRecTable();
   });
   document.getElementById("btnClearRecSelection").addEventListener("click", ()=>{
@@ -2943,10 +3231,11 @@ function openRecForm(id){
   panel.classList.add("open");
   document.getElementById("recFormTitle").textContent = id ? "Edit Receiving Entry" : "New Receiving Entry";
   const defaultSite = isOverall() ? (activeSites()[0]?.id) : currentSite;
-  const r = id ? db.receiving.find(x=>x.id===id) : {site:defaultSite,supplier:"",sku:db.skus[0]?.id,qty:"",cost:db.skus[0]?.cost||"",delivery:"",batch:"",receiver:""};
+  const r = id ? db.receiving.find(x=>x.id===id) : {site:defaultSite,supplier:"",po:"",sku:db.skus[0]?.id,qty:"",cost:db.skus[0]?.cost||"",delivery:"",batch:"",receiver:""};
   document.getElementById("f_rec_site").innerHTML = siteOptionList(r.site);
   applySiteFieldLock("f_rec_site");
   document.getElementById("f_rec_supplier").value = r.supplier;
+  document.getElementById("f_rec_po").value = r.po||"";
   document.getElementById("f_rec_sku").innerHTML = skuOptionList(r.sku);
   document.getElementById("f_rec_qty").value = r.qty;
   const costEl = document.getElementById("f_rec_cost");
@@ -2994,6 +3283,7 @@ function saveRec(){
     date: isEdit ? prior.date : todayStr(),
     timestamp: isEdit ? prior.timestamp : nowTimestamp(),
     supplier,
+    po: document.getElementById("f_rec_po").value.trim(),
     sku: document.getElementById("f_rec_sku").value,
     qty,
     cost: parseFloat(document.getElementById("f_rec_cost").value)||0,
@@ -3004,8 +3294,9 @@ function saveRec(){
   document.getElementById("f_rec_batch").value = rec.batch;
   openReviewConfirm("Confirm Receiving Entry — Is this accurate?", [
     {label:"Site", value:siteName(rec.site)},
-    {label:"SKU", value:rec.sku},
+    {label:"SKU", value:`${rec.sku} — ${skuName(rec.sku)}`},
     {label:"Supplier", value:rec.supplier},
+    {label:"PO Number", value:rec.po||"—"},
     {label:"Quantity", value:fmtInt(rec.qty)},
     {label:"Cost/Unit", value:fmtMoney(rec.cost)},
     {label:"Batch #", value:rec.batch||"—"},
@@ -3058,7 +3349,7 @@ function parseBulkReceiving(raw){
   lines.forEach((line, i)=>{
     const rowNum = i+1+(skippedHeader?1:0);
     const parts = splitDelimited(line, delim);
-    const [siteRaw, supplier, skuRaw, qtyRaw, costRaw, deliveryRaw, batch, receiver] = parts;
+    const [siteRaw, supplier, poRaw, skuRaw, qtyRaw, costRaw, deliveryRaw, batch, receiver] = parts;
 
     const resolvedSite = resolveSiteRef(siteRaw);
     if(resolvedSite === null){
@@ -3090,7 +3381,7 @@ function parseBulkReceiving(raw){
       errors.push(`Row ${rowNum}: could not read Delivery Date "${deliveryRaw}" — left blank`);
     }
     rows.push({
-      site, supplier: supplier.trim(), sku: sku.id, qty,
+      site, supplier: supplier.trim(), po: (poRaw||"").trim(), sku: sku.id, qty,
       cost: parseFloat(costRaw)||0,
       delivery: delivery || "",
       batch: (batch||"").trim(),
@@ -3131,7 +3422,7 @@ function commitBulkRec(rows){
     const batch = r.batch || generateBatchNumber(r.site, r.sku, r.delivery || todayStr());
     const rec = {
       id: newId(), site: r.site, date: todayStr(), timestamp: nowTimestamp(),
-      supplier: r.supplier, sku: r.sku, qty: r.qty, cost: r.cost,
+      supplier: r.supplier, po: r.po||"", sku: r.sku, qty: r.qty, cost: r.cost,
       delivery: r.delivery, batch, receiver: r.receiver,
     };
     db.receiving.push(rec);
@@ -3149,7 +3440,7 @@ function commitBulkRec(rows){
 }
 function renderRecTable(){
   const tbody = document.getElementById("recTbody");
-  const rows = scopedReceiving();
+  const rows = filteredReceiving();
   recSelected.forEach(id => { if(!db.receiving.some(r=>r.id===id)) recSelected.delete(id); });
   const count = recSelected.size;
   const bar = document.getElementById("recBulkBar");
@@ -3163,7 +3454,11 @@ function renderRecTable(){
     selectAll.checked = allSelected;
     selectAll.indeterminate = someSelected && !allSelected;
   }
-  if(rows.length===0){ tbody.innerHTML = `<tr><td colspan="12"><div class="empty-state">${icon("in")}<p>No receiving records ${isOverall()?"yet":"for this site yet"}.</p></div></td></tr>`; return; }
+  if(rows.length===0){
+    const filtered = recSearch.trim() || recDateFilter!=="all";
+    tbody.innerHTML = `<tr><td colspan="14"><div class="empty-state">${icon("in")}<p>${filtered ? "No receiving records match your search/filter." : `No receiving records ${isOverall()?"yet":"for this site yet"}.`}</p></div></td></tr>`;
+    return;
+  }
   tbody.innerHTML = [...rows].sort((a,b)=>b.date.localeCompare(a.date)).map(r=>`
     <tr>
       <td><input type="checkbox" class="rec-row-check" data-id="${r.id}" ${recSelected.has(r.id)?"checked":""}></td>
@@ -3171,7 +3466,9 @@ function renderRecTable(){
       <td class="mono">${r.date}</td>
       <td class="mono">${esc(r.timestamp)||"—"}</td>
       <td>${esc(r.supplier)}</td>
+      <td class="mono">${esc(r.po)||"—"}</td>
       <td class="mono">${esc(r.sku)}</td>
+      <td>${esc(skuName(r.sku))}</td>
       <td class="mono">${fmtInt(r.qty)}</td>
       <td class="mono">${fmtMoney(r.cost)}</td>
       <td class="mono">${r.delivery||"—"}</td>
@@ -3206,6 +3503,25 @@ function renderRecTable(){
    ============================================================ */
 let withdrawalEditId = null;
 let wdSelected = new Set();
+let wdSearch = "";
+let wdDateFilter = "all";
+let wdCustomFrom = "";
+let wdCustomTo = "";
+function filteredWithdrawals(){
+  const q = wdSearch.trim().toLowerCase();
+  let rows = scopedWithdrawals();
+  if(wdDateFilter!=="all") rows = rows.filter(w=>quickDateInRange(w.date, wdDateFilter, wdCustomFrom, wdCustomTo));
+  if(!q) return rows;
+  return rows.filter(w =>
+    String(w.sku||"").toLowerCase().includes(q) ||
+    skuName(w.sku).toLowerCase().includes(q) ||
+    String(w.wo||"").toLowerCase().includes(q) ||
+    String(w.plate||"").toLowerCase().includes(q) ||
+    String(w.requestor||"").toLowerCase().includes(q) ||
+    String(w.batch||"").toLowerCase().includes(q) ||
+    String(w.releasedBy||"").toLowerCase().includes(q)
+  );
+}
 let wdPickedBatch = null; // {batch, received, withdrawn, remaining} currently auto-picked for the open form
 /* Re-runs FIFO batch picking for whichever SKU + Site are currently
    selected on the Withdrawal form, fills in the (readonly) Batch Number
@@ -3258,6 +3574,9 @@ function renderWithdrawal(){
     <div class="toolbar">
       <button class="btn btn-accent" id="btnAddWd">${icon("plus")} New Withdrawal</button>
       <button class="btn" id="btnBulkWd">${icon("file")} Bulk Withdrawal</button>
+      <div class="spacer"></div>
+      ${quickDateFilterHtml("wd", wdDateFilter, wdCustomFrom, wdCustomTo)}
+      <div class="search-box">${icon("search")}<input id="wdSearchInput" placeholder="Search SKU, name, WO#, plate, or requestor..." value="${esc(wdSearch)}"></div>
     </div>
 
     <div class="bulk-bar bulk-neutral" id="wdBulkBar">
@@ -3381,8 +3700,19 @@ MYC,WO-4519,NGP 8890,Maria Santos,ENG-045,10,,"></textarea>
   });
   document.getElementById("f_wd_cost").addEventListener("input", (e)=>{ e.target.dataset.touched="1"; });
   document.getElementById("f_wd_qty").addEventListener("input", enforceWdQtyLimit);
+  document.getElementById("wdSearchInput").addEventListener("input", (e)=>{ wdSearch = e.target.value; renderWdTable(); });
+  document.getElementById("wdDateFilterSelect").addEventListener("change", (e)=>{
+    const picked = QUICK_DATE_FILTERS.find(f=>f.label===e.target.value);
+    wdDateFilter = picked ? picked.key : "all";
+    if(wdDateFilter==="custom" && !wdCustomTo) wdCustomTo = fmtDateLocal(new Date());
+    renderWithdrawal();
+  });
+  const wdFromEl = document.getElementById("wdCustomFrom");
+  const wdToEl = document.getElementById("wdCustomTo");
+  if(wdFromEl) wdFromEl.addEventListener("change", (e)=>{ wdCustomFrom = e.target.value; renderWdTable(); });
+  if(wdToEl) wdToEl.addEventListener("change", (e)=>{ wdCustomTo = e.target.value; renderWdTable(); });
   document.getElementById("wdSelectAll").addEventListener("change", (e)=>{
-    scopedWithdrawals().forEach(w => e.target.checked ? wdSelected.add(w.id) : wdSelected.delete(w.id));
+    filteredWithdrawals().forEach(w => e.target.checked ? wdSelected.add(w.id) : wdSelected.delete(w.id));
     renderWdTable();
   });
   document.getElementById("btnClearWdSelection").addEventListener("click", ()=>{
@@ -3642,7 +3972,7 @@ function commitBulkWd(rows){
 }
 function renderWdTable(){
   const tbody = document.getElementById("wdTbody");
-  const rows = scopedWithdrawals();
+  const rows = filteredWithdrawals();
   wdSelected.forEach(id => { if(!db.withdrawals.some(w=>w.id===id)) wdSelected.delete(id); });
   const count = wdSelected.size;
   const bar = document.getElementById("wdBulkBar");
@@ -3656,7 +3986,11 @@ function renderWdTable(){
     selectAll.checked = allSelected;
     selectAll.indeterminate = someSelected && !allSelected;
   }
-  if(rows.length===0){ tbody.innerHTML = `<tr><td colspan="14"><div class="empty-state">${icon("out")}<p>No withdrawal records ${isOverall()?"yet":"for this site yet"}.</p></div></td></tr>`; return; }
+  if(rows.length===0){
+    const filtered = wdSearch.trim() || wdDateFilter!=="all";
+    tbody.innerHTML = `<tr><td colspan="14"><div class="empty-state">${icon("out")}<p>${filtered ? "No withdrawal records match your search/filter." : `No withdrawal records ${isOverall()?"yet":"for this site yet"}.`}</p></div></td></tr>`;
+    return;
+  }
   tbody.innerHTML = [...rows].sort((a,b)=>b.date.localeCompare(a.date)).map(w=>`
     <tr>
       <td><input type="checkbox" class="wd-row-check" data-id="${w.id}" ${wdSelected.has(w.id)?"checked":""}></td>
@@ -4630,6 +4964,11 @@ function saveTf(){
   // "received" (from the form or from here), clear it if reverted.
   const wasReceived = prior && isTransferReceived(prior);
   const receivedDate = status==="received" ? (wasReceived ? prior.receivedDate : todayStr()) : null;
+  // Preserve any Not-Complete discrepancy data recorded via the receipt
+  // confirmation flow when editing an already-received transfer through
+  // this form; clear it if the status is reverted away from "received".
+  const receivedQty = (status==="received" && wasReceived) ? (prior.receivedQty!=null ? prior.receivedQty : null) : null;
+  const receivedRemarks = (status==="received" && wasReceived) ? (prior.receivedRemarks || "") : "";
   const rec = {
     id: isEdit ? transferEditId : null,
     date: isEdit ? prior.date : todayStr(),
@@ -4640,7 +4979,7 @@ function saveTf(){
     transferredBy: currentUser ? currentUser.name : "",
     handoverTo: document.getElementById("f_tf_handover").value,
     notes: document.getElementById("f_tf_notes").value.trim(),
-    status, receivedDate,
+    status, receivedDate, receivedQty, receivedRemarks,
   };
   openReviewConfirm("Confirm Transfer — Is this accurate?", [
     {label:"SKU", value:rec.sku},
@@ -4693,19 +5032,23 @@ function renderTfTable(){
     const atToSite = isOverall() || String(currentSite)===String(t.toSite);
     const label = transferStatusLabel(t, atToSite ? t.toSite : t.fromSite);
     const received = isTransferReceived(t);
+    const discrepancy = hasTransferDiscrepancy(t);
+    const notesDisplay = discrepancy
+      ? `${esc(t.notes)||""}${t.notes?" · ":""}<span style="color:var(--none);">Discrepancy: received ${fmtInt(transferReceivedQty(t))} of ${fmtInt(t.qty)} — ${esc(t.receivedRemarks)||""}</span>`
+      : (esc(t.notes)||"—");
     return `
     <tr>
       <td><input type="checkbox" class="tf-row-check" data-id="${t.id}" ${tfSelected.has(t.id)?"checked":""}></td>
       <td class="mono">${t.date}</td>
       <td class="mono">${esc(t.sku)}</td>
-      <td class="mono">${fmtInt(t.qty)}</td>
+      <td class="mono">${fmtInt(t.qty)}${discrepancy ? ` <span style="color:var(--none);font-size:11px;">(${fmtInt(transferReceivedQty(t))} recv'd)</span>` : ""}</td>
       <td class="mono">${fmtMoney(t.cost)}</td>
       <td><span class="pill">${esc(siteName(t.fromSite))}</span></td>
       <td><span class="pill">${esc(siteName(t.toSite))}</span></td>
-      <td><span class="badge ${received?'badge-good':'badge-critical'}">${label}</span></td>
+      <td><span class="badge ${received?(discrepancy?'badge-critical':'badge-good'):'badge-critical'}" ${discrepancy?`title="${esc(t.receivedRemarks)||''}"`:''}>${label}</span></td>
       <td>${esc(t.transferredBy)}</td>
       <td>${esc(t.handoverTo)||"—"}</td>
-      <td>${esc(t.notes)||"—"}</td>
+      <td>${notesDisplay}</td>
       <td>
         ${!received ? `<button class="icon-btn" data-recv="${t.id}" title="Confirm receipt at ${esc(siteName(t.toSite))}">${icon("check")}</button>` : ""}
         <button class="icon-btn" data-edit="${t.id}" title="Edit">${icon("edit")}</button>
@@ -4718,14 +5061,7 @@ function renderTfTable(){
     renderTfTable();
   }));
   tbody.querySelectorAll("[data-recv]").forEach(b=>b.addEventListener("click", ()=>{
-    const t = db.transfers.find(x=>x.id===parseInt(b.dataset.recv));
-    if(!t) return;
-    askConfirm("Confirm receipt?", `Marks ${fmtInt(t.qty)} unit(s) of ${t.sku} as received at ${siteName(t.toSite)}. This adds the quantity to that site's on-hand stock.`, ()=>{
-      t.status = "received";
-      t.receivedDate = todayStr();
-      saveModule("transfers");
-      renderTfTable(); renderNotifBell(); toast("Transfer marked as Received");
-    });
+    openTfReceiveConfirm(parseInt(b.dataset.recv));
   }));
   tbody.querySelectorAll("[data-edit]").forEach(b=>b.addEventListener("click", ()=>openTfForm(parseInt(b.dataset.edit))));
   tbody.querySelectorAll("[data-del]").forEach(b=>b.addEventListener("click", ()=>{
@@ -4937,10 +5273,14 @@ let ccViewSessionId = null;
 const CC_PAGE_SIZE = 30;
 let ccActivePage = 0;
 let ccActivePageSessionId = null;
+let ccActiveTruckFilter = "All";
 let ccDetailPage = 0;
 let ccDetailPageSessionId = null;
+let ccDetailTruckFilter = "All";
 let ccSelected = new Set();
 function getActiveSession(){ return scopedCcSessions().find(s=>s.status==="in-progress"); }
+function getSecondCountSession(){ return scopedCcSessions().find(s=>s.status==="second-count"); }
+function getPendingReviewSession(){ return scopedCcSessions().find(s=>s.status==="pending-review"); }
 function computeSessionStats(session){
   const total = session.items.length || 1;
   const matched = session.items.filter(i=>i.remark==="Matched").length;
@@ -4955,20 +5295,46 @@ function computeSessionStats(session){
     missingRate: missing/total*100,
   };
 }
+/* Centralized helpers for a cycle count line item's status, since a
+   blank/not-counted SKU (countedQty === null) must always be treated as
+   a discrepancy needing Admin attention — never silently read as "0 on
+   hand" — while still keeping a real physical count of zero distinct. */
+function itemWasCounted(it){ return it.countedQty!==null && it.countedQty!==undefined && it.countedQty!==""; }
+function itemVariance(it){ return itemWasCounted(it) ? (parseInt(it.countedQty)||0) - Number(it.systemQty) : null; }
+function isItemDiscrepant(it){ return !itemWasCounted(it) || itemVariance(it)!==0; }
+/* Live (not-yet-final) variance stats for a session still awaiting Admin
+   review — computed straight off the current countedQty vs. the frozen
+   systemQty, since it.remark isn't assigned until Approve is clicked. */
+function computeLiveSessionStats(session){
+  const total = session.items.length || 1;
+  let matched = 0, discrepancy = 0, notCounted = 0;
+  session.items.forEach(it=>{
+    if(!itemWasCounted(it)){ notCounted++; discrepancy++; }
+    else if(itemVariance(it)===0) matched++;
+    else discrepancy++;
+  });
+  return { total: session.items.length, matched, discrepancy, notCounted, matchRate: matched/total*100 };
+}
 function renderCycleCount(){
   const el = document.getElementById("content");
   if(ccViewSessionId){ renderSessionDetail(ccViewSessionId); return; }
   if(isOverall()){ renderOverallCycleCountDashboard(); return; }
   const active = getActiveSession();
   if(active){ renderActiveSession(active); return; }
-
+  const secondCount = getSecondCountSession();
+  if(secondCount){ renderSecondCountSession(secondCount); return; }
+  const pending = getPendingReviewSession();
+  if(pending){
+    if(isAdmin()){ renderCycleCountSummary(pending); return; }
+    renderPendingReviewLocked(pending); return;
+  }
   const completed = scopedCcSessions().filter(s=>s.status==="completed").sort((a,b)=>b.date.localeCompare(a.date));
   ccSelected.forEach(id => { if(!completed.some(s=>s.id===id)) ccSelected.delete(id); });
   el.innerHTML = `
     <div class="card card-pad" style="margin-bottom:18px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:14px;">
       <div>
         <h3 style="font-family:var(--font-display);font-size:18px;margin:0 0 4px 0;">Start a new cycle count — ${esc(siteName(currentSite))}</h3>
-        <p style="margin:0;color:var(--text-dim);font-size:12.5px;">Freezes today's system on-hand quantities for every SKU at this site so you can record the physical count against them.</p>
+        <p style="margin:0;color:var(--text-dim);font-size:12.5px;">Freezes today's system on-hand quantities for every SKU at this site that currently has stock or has any transaction history — SKUs that have never moved and sit at zero are left off the list.</p>
       </div>
       <button class="btn btn-accent" id="btnProceedCC">${icon("check")} Proceed with Cycle Count</button>
     </div>
@@ -5080,20 +5446,22 @@ function generateAdjustmentsFromSession(session){
         variance,
         remark: it.remark,
         notes: it.notes,
-        adjustedBy: session.countedBy || "—",
+        adjustedBy: session.approvedBy || session.countedBy || "—",
       });
     }
   });
   return records;
 }
 function startCycleCountSession(){
-  const items = db.skus.map(s=>({sku:s.id, systemQty:onHand(s.id), countedQty:"", remark:"", notes:""}));
+  const eligibleSkus = db.skus.filter(s=>isEligibleForCycleCount(s.id));
+  const items = eligibleSkus.map(s=>({sku:s.id, systemQty:onHand(s.id), countedQty:"", remark:"", notes:""}));
   const session = {id:newId(), date:todayStr(), createdAt:nowTimestamp(), status:"in-progress", countedBy:"", site:currentSite, items};
   db.ccSessions.push(session);
   saveModule("ccSessions");
   renderCycleCount();
   renderNotifBell();
-  toast("Cycle count started — system quantities frozen for today");
+  const skipped = db.skus.length - eligibleSkus.length;
+  toast(`Cycle count started — ${eligibleSkus.length} SKU(s) with stock or history frozen for today${skipped ? ` (${skipped} untouched SKU(s) excluded)` : ""}`);
 }
 /* Aggregated cross-site view shown when the topbar scope is "Overall".
    Cycle counts themselves are still run one site at a time — this
@@ -5103,42 +5471,49 @@ function renderOverallCycleCountDashboard(){
   const allCompleted = db.ccSessions.filter(s=>s.status==="completed").sort((a,b)=>b.date.localeCompare(a.date));
   const perSite = db.sites.map(site=>{
     const sessions = db.ccSessions.filter(s=>String(s.site)===String(site.id));
-    const active = sessions.find(s=>s.status==="in-progress");
+    const open = sessions.find(s=>s.status!=="completed");
     const completed = sessions.filter(s=>s.status==="completed").sort((a,b)=>b.date.localeCompare(a.date));
     const last = completed[0];
     const stats = last ? computeSessionStats(last) : null;
-    return {site, active, last, stats};
+    return {site, open, last, stats};
   });
   const totalCompleted = allCompleted.length;
   const avgAccuracy = totalCompleted ? allCompleted.reduce((a,s)=>a+computeSessionStats(s).accuracyRate,0)/totalCompleted : 0;
-  const activeCount = perSite.filter(p=>p.active).length;
-  const neverCounted = perSite.filter(p=>!p.last && !p.active).length;
+  const openCount = perSite.filter(p=>p.open).length;
+  const pendingReviewCount = perSite.filter(p=>p.open && p.open.status==="pending-review").length;
+  const neverCounted = perSite.filter(p=>!p.last && !p.open).length;
+  const openStatusBadge = (status)=>{
+    if(status==="in-progress") return `<span class="badge badge-critical">In Progress</span>`;
+    if(status==="second-count") return `<span class="badge badge-critical">2nd Blind Count</span>`;
+    if(status==="pending-review") return `<span class="badge badge-critical" style="background:var(--accent-soft);color:var(--accent);">Pending Admin Review</span>`;
+    return "";
+  };
 
   el.innerHTML = `
     <div class="kpi-row">
       <div class="kpi accent-bar"><div class="label">Sites</div><div class="value">${fmtInt(db.sites.length)}</div><div class="sub">${fmtInt(activeSites().length)} active</div></div>
-      <div class="kpi crit-bar"><div class="label">Counts In Progress</div><div class="value">${fmtInt(activeCount)}</div><div class="sub">Across all sites</div></div>
-      <div class="kpi good-bar"><div class="label">Avg. Accuracy Rate</div><div class="value">${totalCompleted ? avgAccuracy.toFixed(1)+"%" : "—"}</div><div class="sub">${fmtInt(totalCompleted)} completed session(s)</div></div>
+      <div class="kpi crit-bar"><div class="label">Counts Open</div><div class="value">${fmtInt(openCount)}</div><div class="sub">${fmtInt(pendingReviewCount)} awaiting Admin review</div></div>
+      <div class="kpi good-bar"><div class="label">Avg. Accuracy Rate</div><div class="value">${totalCompleted ? avgAccuracy.toFixed(1)+"%" : "—"}</div><div class="sub">${fmtInt(totalCompleted)} approved session(s)</div></div>
       <div class="kpi none-bar"><div class="label">Sites Never Counted</div><div class="value">${fmtInt(neverCounted)}</div><div class="sub">No cycle count on record</div></div>
     </div>
 
-    <div class="section-head"><h3 style="font-size:16px;">Cycle count status by site</h3><p>Pick a site to start, resume, or review its cycle counts.</p></div>
+    <div class="section-head"><h3 style="font-size:16px;">Cycle count status by site</h3><p>Pick a site to start, resume, review, or approve its cycle count.</p></div>
     <div class="table-wrap" style="margin-bottom:22px;">
       <table>
-        <thead><tr><th>Site</th><th>Status</th><th>Last Completed</th><th>Last Accuracy Rate</th><th></th></tr></thead>
+        <thead><tr><th>Site</th><th>Status</th><th>Last Approved</th><th>Last Accuracy Rate</th><th></th></tr></thead>
         <tbody>${perSite.length ? perSite.map(p=>`
           <tr>
             <td>${esc(p.site.name)}</td>
-            <td>${p.active ? `<span class="badge badge-critical">In Progress</span>` : (p.last ? `<span class="badge badge-good">Up to date</span>` : `<span class="badge badge-inactive">Never counted</span>`)}</td>
+            <td>${p.open ? openStatusBadge(p.open.status) : (p.last ? `<span class="badge badge-good">Up to date</span>` : `<span class="badge badge-inactive">Never counted</span>`)}</td>
             <td class="mono">${p.last ? p.last.date : "—"}</td>
             <td class="mono" style="color:var(--good);font-weight:700;">${p.stats ? p.stats.accuracyRate.toFixed(1)+"%" : "—"}</td>
-            <td><button class="btn btn-sm" data-goto-site="${p.site.id}">${p.active ? "Resume Count" : "Open Site"}</button></td>
+            <td><button class="btn btn-sm" data-goto-site="${p.site.id}">${p.open ? (p.open.status==="pending-review" ? (isAdmin() ? "Review Count" : "View Status") : "Resume Count") : "Open Site"}</button></td>
           </tr>
         `).join("") : `<tr><td colspan="5" style="color:var(--text-faint)">No sites yet — add one in Site Management.</td></tr>`}</tbody>
       </table>
     </div>
 
-    <div class="section-head"><h3 style="font-size:16px;">All completed cycle counts</h3></div>
+    <div class="section-head"><h3 style="font-size:16px;">All approved cycle counts</h3></div>
     <div class="table-wrap">
       <table>
         <thead><tr><th>Site</th><th>Date</th><th>SKUs Counted</th><th>Accuracy Rate</th><th>Damaged Rate</th><th>Unrecorded Rate</th><th></th></tr></thead>
@@ -5185,17 +5560,19 @@ function renderOverallCycleCountDashboard(){
 }
 function renderActiveSession(session){
   const el = document.getElementById("content");
-  if(ccActivePageSessionId !== session.id){ ccActivePageSessionId = session.id; ccActivePage = 0; }
-  const totalPages = Math.max(1, Math.ceil(session.items.length / CC_PAGE_SIZE));
+  if(ccActivePageSessionId !== session.id){ ccActivePageSessionId = session.id; ccActivePage = 0; ccActiveTruckFilter = "All"; }
+  const truckOptions = ["All", ...truckUsersInUse()];
+  const filteredItems = ccActiveTruckFilter==="All" ? session.items : session.items.filter(it => truckUserFirstWord(skuObj(it.sku)?.truckUser) === ccActiveTruckFilter);
+  const totalPages = Math.max(1, Math.ceil(filteredItems.length / CC_PAGE_SIZE));
   if(ccActivePage >= totalPages) ccActivePage = totalPages - 1;
   if(ccActivePage < 0) ccActivePage = 0;
   const startIdx = ccActivePage * CC_PAGE_SIZE;
-  const pageItems = session.items.slice(startIdx, startIdx + CC_PAGE_SIZE);
+  const pageItems = filteredItems.slice(startIdx, startIdx + CC_PAGE_SIZE);
   el.innerHTML = `
     <div class="card card-pad" style="margin-bottom:14px;">
       <div class="section-head" style="margin-bottom:10px;">
         <h3 style="font-size:16px;">Cycle Count in progress — ${esc(siteName(session.site))} — frozen ${session.date}</h3>
-        <p>System quantities below are locked as of the start of this count. Enter the physical count and a remark for each SKU.</p>
+        <p>System quantities below are locked as of the start of this count. Enter the physical count for each SKU, then submit for Admin review — nothing is finalized or adjusted until an Admin approves it. You can submit even if some SKUs are left blank; any not counted are automatically flagged for a 2nd Blind Count.</p>
       </div>
       <div class="field" style="max-width:280px;">
         <label>Counted By (applies to this session)</label>
@@ -5203,8 +5580,12 @@ function renderActiveSession(session){
       </div>
     </div>
     <div class="toolbar" style="justify-content:space-between;">
-      <span style="color:var(--text-dim);font-size:12.5px;">Showing ${fmtInt(startIdx+1)}–${fmtInt(Math.min(startIdx+CC_PAGE_SIZE, session.items.length))} of ${fmtInt(session.items.length)} SKU(s)</span>
-      <div style="display:flex;gap:8px;align-items:center;">
+      <div style="display:flex;align-items:center;gap:10px;">
+        <span style="color:var(--text-dim);font-size:12.5px;">Showing ${filteredItems.length ? fmtInt(startIdx+1) : 0}–${fmtInt(Math.min(startIdx+CC_PAGE_SIZE, filteredItems.length))} of ${fmtInt(filteredItems.length)} SKU(s)${ccActiveTruckFilter!=="All" ? ` (filtered from ${fmtInt(session.items.length)})` : ""}</span>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+        <label style="font-size:12px;color:var(--text-dim);white-space:nowrap;">Truck User</label>
+        <select class="select-filter" id="ccActiveTruckFilterSelect" style="max-width:220px;">${optionList(truckOptions, ccActiveTruckFilter)}</select>
         <button class="btn" id="btnCCPrevPage" ${ccActivePage===0?"disabled":""}>← Prev</button>
         <span style="font-size:12.5px;color:var(--text-dim);">Page ${ccActivePage+1} of ${totalPages}</span>
         <button class="btn" id="btnCCNextPage" ${ccActivePage>=totalPages-1?"disabled":""}>Next →</button>
@@ -5212,37 +5593,39 @@ function renderActiveSession(session){
     </div>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>SKU</th><th>Name</th><th>System Qty (Frozen)</th><th>Counted Qty</th><th>Remark</th><th>Notes</th></tr></thead>
-        <tbody>${pageItems.map((it)=>{
+        <thead><tr><th>SKU</th><th>Name</th><th>Truck User</th>${isAdmin() ? `<th>System Qty (Frozen)</th>` : ""}<th>Counted Qty</th></tr></thead>
+        <tbody>${pageItems.length ? pageItems.map((it)=>{
           const idx = session.items.indexOf(it);
           return `
           <tr>
             <td class="mono">${esc(it.sku)}</td>
             <td>${esc(skuName(it.sku))}</td>
-            <td class="mono">${fmtInt(it.systemQty)}</td>
+            <td>${esc(skuObj(it.sku)?.truckUser||"—")}</td>
+            ${isAdmin() ? `<td class="mono">${fmtInt(it.systemQty)}</td>` : ""}
             <td><input class="mono ccinput" data-idx="${idx}" data-field="countedQty" type="number" min="0" value="${it.countedQty}" style="width:80px;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:6px;"></td>
-            <td><select class="ccinput" data-idx="${idx}" data-field="remark" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:6px;">
-              <option value="">Select…</option>
-              ${optionList(CC_REMARKS, it.remark)}
-            </select></td>
-            <td><input class="ccinput" data-idx="${idx}" data-field="notes" value="${esc(it.notes)}" placeholder="Optional" style="width:170px;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:6px;"></td>
           </tr>
-        `;}).join("")}</tbody>
+        `;}).join("") : `<tr><td colspan="${isAdmin()?5:4}" style="color:var(--text-faint)">No SKUs match this Truck User filter.</td></tr>`}</tbody>
       </table>
     </div>
+    ${!isAdmin() ? `<p style="color:var(--text-faint);font-size:11.5px;margin-top:8px;">System Qty (Frozen) is hidden for a blind count — only Admin accounts can see the expected quantity while counting.</p>` : ""}
     <div class="toolbar" style="justify-content:flex-end;">
       <button class="btn" id="btnCCPrevPage2" ${ccActivePage===0?"disabled":""}>← Prev</button>
       <span style="font-size:12.5px;color:var(--text-dim);align-self:center;">Page ${ccActivePage+1} of ${totalPages}</span>
       <button class="btn" id="btnCCNextPage2" ${ccActivePage>=totalPages-1?"disabled":""}>Next →</button>
     </div>
     <div class="form-actions">
-      <button class="btn btn-accent" id="btnCompleteCC">Complete Count</button>
+      <button class="btn btn-accent" id="btnCompleteCC">Submit for Review</button>
       <button class="btn" id="btnSaveProgressCC">Save Progress</button>
-      <button class="btn" id="btnPrintCC">${icon("file")} Print Count Sheet</button>
+      <button class="btn" id="btnPrintCC" title="${ccActiveTruckFilter!=='All' ? `Prints only Truck User: ${esc(ccActiveTruckFilter)}` : 'Prints all SKUs in this session'}">${icon("file")} Print Count Sheet${ccActiveTruckFilter!=="All" ? ` (${esc(ccActiveTruckFilter)})` : ""}</button>
       <button class="btn btn-danger" id="btnCancelCCSession">Cancel Count</button>
     </div>
   `;
   document.getElementById("f_cc_session_by").addEventListener("input",(e)=>{ session.countedBy=e.target.value; });
+  document.getElementById("ccActiveTruckFilterSelect").addEventListener("change",(e)=>{
+    ccActiveTruckFilter = e.target.value;
+    ccActivePage = 0;
+    renderActiveSession(session);
+  });
   const gotoPage = (p)=>{ ccActivePage = p; renderActiveSession(session); };
   [document.getElementById("btnCCPrevPage"), document.getElementById("btnCCPrevPage2")].forEach(b=>b && b.addEventListener("click", ()=>{ if(ccActivePage>0) gotoPage(ccActivePage-1); }));
   [document.getElementById("btnCCNextPage"), document.getElementById("btnCCNextPage2")].forEach(b=>b && b.addEventListener("click", ()=>{ if(ccActivePage<totalPages-1) gotoPage(ccActivePage+1); }));
@@ -5255,7 +5638,7 @@ function renderActiveSession(session){
     inp.addEventListener("change", handler);
   });
   document.getElementById("btnSaveProgressCC").addEventListener("click", ()=>{ saveModule("ccSessions"); toast("Progress saved"); });
-  document.getElementById("btnPrintCC").addEventListener("click", ()=>printCycleCountSheet(session));
+  document.getElementById("btnPrintCC").addEventListener("click", ()=>printCycleCountSheet(session, ccActiveTruckFilter));
   document.getElementById("btnCancelCCSession").addEventListener("click", ()=>{
     askConfirm("Cancel this cycle count?","All entered counts for this session will be discarded.", ()=>{
       db.ccSessions = db.ccSessions.filter(s=>s.id!==session.id);
@@ -5265,47 +5648,298 @@ function renderActiveSession(session){
     });
   });
   document.getElementById("btnCompleteCC").addEventListener("click", ()=>{
-    const missing = session.items.filter(it=>it.countedQty===""||it.remark==="");
-    if(missing.length){ toast(`${missing.length} SKU(s) still need a counted qty and remark`); return; }
-    const stats = computeSessionStats(session);
-    openReviewConfirm("Complete Cycle Count — Is this accurate?", [
-      {label:"SKUs Counted", value:stats.total},
-      {label:"Accuracy Rate", value:stats.accuracyRate.toFixed(1)+"%"},
-      {label:"Damaged Rate", value:stats.damagedRate.toFixed(1)+"%"},
-      {label:"Unrecorded Rate", value:stats.unrecordedRate.toFixed(1)+"%"},
-      {label:"Missing/Shortage Rate", value:stats.missingRate.toFixed(1)+"%"},
+    const uncounted = session.items.filter(it=>it.countedQty==="");
+    openReviewConfirm("Submit Cycle Count for Review — Is this accurate?", [
+      {label:"Site", value:siteName(session.site)},
+      {label:"SKUs Counted", value:session.items.length - uncounted.length},
+      {label:"SKUs Not Counted", value:uncounted.length},
+      ...(uncounted.length ? [{label:"Note", value:"Not-counted SKUs will be flagged for a 2nd Blind Count"}] : []),
     ], ()=>{
-      session.items.forEach(it=>{ it.countedQty = parseInt(it.countedQty)||0; });
-      session.status = "completed";
-      const newAdjustments = generateAdjustmentsFromSession(session);
-      if(newAdjustments.length){
-        db.adjustments.push(...newAdjustments);
-        saveModule("adjustments");
-      }
+      // A blank field means "not counted" — kept as null (not 0), so it's
+      // distinguishable from an actual physical count of zero and is
+      // always treated as a discrepancy the Admin must resolve (typically
+      // via a 2nd Blind Count) rather than silently read as "0 on hand".
+      session.items.forEach(it=>{ it.countedQty = it.countedQty==="" ? null : (parseInt(it.countedQty)||0); });
+      session.status = "pending-review";
+      session.submittedBy = currentUser ? currentUser.name : "";
+      session.submittedAt = nowTimestamp();
       saveModule("ccSessions");
       renderCycleCount();
-      toast(newAdjustments.length
-        ? `Cycle count completed — ${newAdjustments.length} stock adjustment(s) posted`
-        : "Cycle count completed — no discrepancies, nothing to adjust");
+      renderNotifBell();
+      toast(uncounted.length
+        ? `Cycle count submitted with ${uncounted.length} SKU(s) not counted — awaiting Admin review.`
+        : "Cycle count submitted — awaiting Admin review. Nothing is finalized or adjusted until it's approved.");
     });
   });
 }
+
+/* Shown to non-admin accounts when this site's cycle count has been
+   submitted and is sitting with an Admin for review — locked, no data
+   shown, since the review/second-count/approval workflow is Admin-only. */
+function renderPendingReviewLocked(session){
+  const el = document.getElementById("content");
+  el.innerHTML = `
+    <div class="card card-pad" style="text-align:center;padding:50px 24px;">
+      ${icon("check")}
+      <h3 style="font-family:var(--font-display);font-size:20px;margin:14px 0 6px 0;">Cycle Count Submitted</h3>
+      <p style="color:var(--text-dim);max-width:440px;margin:0 auto;line-height:1.6;">
+        Your count for <strong style="color:var(--text);">${esc(siteName(session.site))}</strong> (frozen ${esc(session.date)}) was submitted
+        ${session.submittedAt ? `on ${esc(session.submittedAt)} ` : ""}and is awaiting Admin review.
+        Results aren't finalized and nothing is adjusted in stock until an Admin approves it.
+        You'll be able to start a new cycle count for this site once this one is resolved.
+      </p>
+    </div>
+  `;
+}
+
+/* Admin-only review screen for a submitted-but-not-yet-approved cycle
+   count. From here an Admin can trigger a 2nd blind recount for any
+   SKU with a discrepancy, or Approve the count outright — Approve is
+   the only action that finalizes remarks and posts stock adjustments. */
+function renderCycleCountSummary(session){
+  const el = document.getElementById("content");
+  const stats = computeLiveSessionStats(session);
+  const discrepantItems = session.items.filter(isItemDiscrepant);
+  const canTriggerSecondCount = discrepantItems.length>0 && !session.secondCountDone;
+  const untaggedCount = discrepantItems.filter(it=>!it.adminTag).length;
+  el.innerHTML = `
+    <div class="card card-pad" style="margin-bottom:14px;">
+      <div class="section-head" style="margin-bottom:6px;">
+        <h3 style="font-size:16px;">Cycle Count Summary — ${esc(siteName(session.site))} — frozen ${esc(session.date)}</h3>
+        <p>Submitted by ${esc(session.submittedBy)||"—"}${session.submittedAt?` on ${esc(session.submittedAt)}`:""}. Review below, optionally trigger a 2nd blind count on discrepancies (including any SKU left uncounted), tag every discrepancy with the correct reason, then Approve to finalize and post stock adjustments.</p>
+      </div>
+      ${session.secondCountDone ? `<p style="margin:0;color:var(--text-dim);font-size:12px;">2nd blind count completed by ${esc(session.secondCountSubmittedBy)||"—"}${session.secondCountSubmittedAt?` on ${esc(session.secondCountSubmittedAt)}`:""} for ${fmtInt((session.secondCountSkus||[]).length)} SKU(s).</p>` : ""}
+    </div>
+    <div class="kpi-row" style="grid-template-columns:repeat(4,1fr);">
+      <div class="kpi accent-bar"><div class="label">SKUs Counted</div><div class="value">${fmtInt(stats.total)}</div></div>
+      <div class="kpi good-bar"><div class="label">Matched</div><div class="value">${fmtInt(stats.matched)}</div><div class="sub">${stats.matchRate.toFixed(1)}% of counted SKUs</div></div>
+      <div class="kpi none-bar"><div class="label">Discrepancies</div><div class="value">${fmtInt(stats.discrepancy)}</div><div class="sub">Counted qty ≠ system qty, or not counted</div></div>
+      <div class="kpi crit-bar"><div class="label">Untagged Discrepancies</div><div class="value">${fmtInt(untaggedCount)}</div><div class="sub">Need a tag before you can approve</div></div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>SKU</th><th>Name</th><th>Truck User</th><th>System Qty</th>${session.secondCountDone ? `<th>1st Count</th>` : ""}<th>${session.secondCountDone ? "2nd Count" : "Counted Qty"}</th><th>Variance</th><th>Result</th><th style="min-width:230px;">Tag</th></tr></thead>
+        <tbody>${session.items.map(it=>{
+          const idx = session.items.indexOf(it);
+          const counted = itemWasCounted(it);
+          const variance = itemVariance(it);
+          const discrepant = isItemDiscrepant(it);
+          const wasRecounted = it.firstCountQty!==undefined && (session.secondCountSkus||[]).includes(it.sku);
+          return `<tr>
+            <td class="mono">${esc(it.sku)}</td>
+            <td>${esc(skuName(it.sku))}</td>
+            <td>${esc(skuObj(it.sku)?.truckUser||"—")}</td>
+            <td class="mono">${fmtInt(it.systemQty)}</td>
+            ${session.secondCountDone ? `<td class="mono">${wasRecounted ? (it.firstCountQty===null ? `<span style="color:var(--text-faint);">Not Counted</span>` : fmtInt(it.firstCountQty)) : "—"}</td>` : ""}
+            <td class="mono">${counted ? fmtInt(it.countedQty) : `<span style="color:var(--text-faint);">Not Counted</span>`}</td>
+            <td class="mono" style="color:${!counted?'var(--critical)':variance===0?'var(--good)':'var(--none)'};font-weight:700;">${!counted ? "—" : (variance>0?'+':'')+fmtInt(variance)}</td>
+            <td>${!counted ? `<span class="badge badge-critical">Not Counted</span>` : variance===0 ? `<span class="badge badge-good">Matched</span>` : `<span class="badge badge-none">Discrepancy</span>`}</td>
+            <td>${discrepant ? `
+              <select class="cc-tag-select" data-idx="${idx}" style="width:100%;background:var(--surface2);border:1px solid ${it.adminTag?'var(--border)':'var(--none)'};color:var(--text);padding:6px 8px;border-radius:6px;font-size:12px;">
+                <option value="">Select tag…</option>
+                ${optionList(CC_TAG_OPTIONS, it.adminTag)}
+              </select>
+            ` : `<span style="color:var(--text-faint);">—</span>`}</td>
+          </tr>`;
+        }).join("")}</tbody>
+      </table>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-accent" id="btnApproveCC">${icon("check")} Approve Cycle Count</button>
+      <button class="btn" id="btnSecondCountCC" ${canTriggerSecondCount ? "" : "disabled"} title="${discrepantItems.length===0 ? "No discrepancies to recount" : session.secondCountDone ? "A 2nd blind count has already been done for this session" : `Recount ${discrepantItems.length} SKU(s) with a discrepancy or left uncounted`}">${icon("qrcode")} Trigger 2nd Blind Count${discrepantItems.length ? ` (${fmtInt(discrepantItems.length)})` : ""}</button>
+      <button class="btn" id="btnPrintCCSummary">${icon("file")} Print Count Sheet</button>
+      <button class="btn btn-danger" id="btnRejectCC">Reject &amp; Reopen for Recount</button>
+    </div>
+  `;
+  el.querySelectorAll(".cc-tag-select").forEach(sel=>{
+    sel.addEventListener("change", (e)=>{
+      session.items[parseInt(e.target.dataset.idx)].adminTag = e.target.value;
+      saveModule("ccSessions");
+      renderCycleCountSummary(session);
+    });
+  });
+  document.getElementById("btnApproveCC").addEventListener("click", ()=>approveCycleCount(session));
+  document.getElementById("btnPrintCCSummary").addEventListener("click", ()=>printCycleCountSheet(session, "All"));
+  if(canTriggerSecondCount){
+    document.getElementById("btnSecondCountCC").addEventListener("click", ()=>triggerSecondBlindCount(session));
+  }
+  document.getElementById("btnRejectCC").addEventListener("click", ()=>{
+    askConfirm("Reject and reopen for a full recount?", "This discards all counted quantities and sends the session back to an in-progress blind count for this site — nothing is adjusted.", ()=>{
+      session.items.forEach(it=>{ it.countedQty = ""; it.remark=""; it.notes=""; delete it.firstCountQty; delete it.adminTag; delete it.firstAdminTag; });
+      delete session.secondCountSkus; delete session.secondCountDone;
+      delete session.secondCountTriggeredBy; delete session.secondCountTriggeredAt;
+      delete session.secondCountSubmittedBy; delete session.secondCountSubmittedAt;
+      session.status = "in-progress";
+      session.submittedBy = ""; session.submittedAt = "";
+      saveModule("ccSessions");
+      renderCycleCount();
+      renderNotifBell();
+      toast("Cycle count reopened for a full recount");
+    }, "Reopen for Recount", true);
+  });
+}
+
+/* Resets the counted quantity for every SKU with a discrepancy so it can
+   be blindly recounted — the original (first-round) counted quantity is
+   preserved on the item as firstCountQty for the Admin's later
+   comparison, but is not shown to whoever performs the 2nd count. */
+function triggerSecondBlindCount(session){
+  if(!isAdmin()){ toast("Only an Admin account can trigger a 2nd blind count"); return; }
+  const discrepant = session.items.filter(isItemDiscrepant);
+  if(!discrepant.length){ toast("No discrepancies to recount"); return; }
+  const notCountedCount = discrepant.filter(it=>!itemWasCounted(it)).length;
+  askConfirm("Trigger 2nd Blind Count?", `This resets the counted quantity for ${discrepant.length} SKU(s) with a discrepancy${notCountedCount ? ` (including ${notCountedCount} left uncounted)` : ""} so they can be recounted blind (without seeing the first count or system qty). Any prior count is kept for your later comparison.`, ()=>{
+    discrepant.forEach(it=>{ it.firstCountQty = itemWasCounted(it) ? (parseInt(it.countedQty)||0) : null; it.countedQty = ""; it.firstAdminTag = it.adminTag||""; delete it.adminTag; });
+    session.status = "second-count";
+    session.secondCountSkus = discrepant.map(it=>it.sku);
+    session.secondCountTriggeredBy = currentUser ? currentUser.name : "";
+    session.secondCountTriggeredAt = nowTimestamp();
+    saveModule("ccSessions");
+    renderCycleCount();
+    renderNotifBell();
+    toast(`2nd blind count started for ${discrepant.length} SKU(s)`);
+  }, "Trigger 2nd Count", false);
+}
+
+/* Finalizes a cycle count: only now are per-item remarks assigned and
+   any resulting stock adjustments actually posted — nothing is declared
+   or adjusted before an Admin explicitly approves it here. Every
+   discrepant SKU must already carry an Admin-selected tag (see the Tag
+   column on the Summary screen) — Approve is blocked until each one has
+   a declared reason, so "why" is always on record, not just "what". */
+function approveCycleCount(session){
+  if(!isAdmin()){ toast("Only an Admin account can approve a cycle count"); return; }
+  const untagged = session.items.filter(it => isItemDiscrepant(it) && !it.adminTag);
+  if(untagged.length){
+    toast(`${untagged.length} discrepant SKU(s) still need a tag before you can approve — select a reason for each in the Tag column.`);
+    return;
+  }
+  const stillUncounted = session.items.filter(it=>!itemWasCounted(it));
+  const body = stillUncounted.length
+    ? `${stillUncounted.length} SKU(s) are still not counted and will be treated as 0 on hand for adjustment purposes. This finalizes the results and posts any stock adjustments needed. This cannot be undone.`
+    : "This finalizes the results and posts any stock adjustments needed for discrepancies. This cannot be undone.";
+  askConfirm("Approve this cycle count?", body, ()=>{
+    session.items.forEach(it=>{
+      const wasRecounted = it.firstCountQty!==undefined && (session.secondCountSkus||[]).includes(it.sku);
+      const counted = itemWasCounted(it) ? (parseInt(it.countedQty)||0) : 0;
+      const variance = counted - Number(it.systemQty);
+      const discrepant = variance!==0;
+      // A discrepant SKU's final remark is the Admin's declared tag
+      // (the actual business reason), not a generic bucket label.
+      it.remark = discrepant ? it.adminTag : "Matched";
+      const recountNote = wasRecounted
+        ? `2nd blind count confirmed ${counted} (initial count was ${it.firstCountQty===null ? "not counted" : it.firstCountQty}). `
+        : "";
+      const uncountedNote = (!itemWasCounted(it)) ? "Not counted — defaulted to 0 on Admin approval. " : "";
+      it.notes = (recountNote + uncountedNote).trim();
+      it.countedQty = counted;
+    });
+    session.status = "completed";
+    session.approvedBy = currentUser ? currentUser.name : "";
+    session.approvedAt = nowTimestamp();
+    const newAdjustments = generateAdjustmentsFromSession(session);
+    if(newAdjustments.length){
+      db.adjustments.push(...newAdjustments);
+      saveModule("adjustments");
+    }
+    saveModule("ccSessions");
+    renderCycleCount();
+    renderNotifBell();
+    toast(newAdjustments.length
+      ? `Cycle count approved — ${newAdjustments.length} stock adjustment(s) posted`
+      : "Cycle count approved — no discrepancies, nothing to adjust");
+  }, "Approve", false);
+}
+
+/* 2nd blind count entry screen — restricted to just the SKUs flagged
+   with a discrepancy from the first round. System Qty and the first
+   count are deliberately never shown here, to anyone (including
+   Admin), so the recount is genuinely blind. */
+function renderSecondCountSession(session){
+  const el = document.getElementById("content");
+  const items = session.items.filter(it => (session.secondCountSkus||[]).includes(it.sku));
+  el.innerHTML = `
+    <div class="card card-pad" style="margin-bottom:14px;">
+      <div class="section-head" style="margin-bottom:6px;">
+        <h3 style="font-size:16px;">2nd Blind Count — ${esc(siteName(session.site))} — frozen ${esc(session.date)}</h3>
+        <p>An Admin flagged ${fmtInt(items.length)} SKU(s) with a discrepancy for a blind recount. Enter the physical count again for each — system qty and the first count are hidden so this recount isn't biased.</p>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>SKU</th><th>Name</th><th>Truck User</th><th>Counted Qty</th></tr></thead>
+        <tbody>${items.map((it)=>{
+          const idx = session.items.indexOf(it);
+          return `
+          <tr>
+            <td class="mono">${esc(it.sku)}</td>
+            <td>${esc(skuName(it.sku))}</td>
+            <td>${esc(skuObj(it.sku)?.truckUser||"—")}</td>
+            <td><input class="mono cc2input" data-idx="${idx}" type="number" min="0" value="${it.countedQty}" style="width:80px;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:6px;"></td>
+          </tr>
+        `;}).join("")}</tbody>
+      </table>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-accent" id="btnSubmitSecondCount">Submit 2nd Count</button>
+      <button class="btn btn-danger" id="btnCancelSecondCount">Cancel 2nd Count</button>
+    </div>
+  `;
+  el.querySelectorAll(".cc2input").forEach(inp=>{
+    const handler = ()=>{ session.items[parseInt(inp.dataset.idx)].countedQty = inp.value; };
+    inp.addEventListener("input", handler);
+    inp.addEventListener("change", handler);
+  });
+  document.getElementById("btnSubmitSecondCount").addEventListener("click", ()=>{
+    const missing = items.filter(it=>it.countedQty==="");
+    if(missing.length){ toast(`${missing.length} SKU(s) still need a recounted qty`); return; }
+    openReviewConfirm("Submit 2nd Blind Count — Is this accurate?", [
+      {label:"Site", value:siteName(session.site)},
+      {label:"SKUs Recounted", value:items.length},
+    ], ()=>{
+      items.forEach(it=>{ it.countedQty = parseInt(it.countedQty)||0; });
+      session.status = "pending-review";
+      session.secondCountDone = true;
+      session.secondCountSubmittedBy = currentUser ? currentUser.name : "";
+      session.secondCountSubmittedAt = nowTimestamp();
+      saveModule("ccSessions");
+      renderCycleCount();
+      renderNotifBell();
+      toast("2nd blind count submitted — back with Admin for final review.");
+    });
+  });
+  document.getElementById("btnCancelSecondCount").addEventListener("click", ()=>{
+    askConfirm("Cancel the 2nd blind count?", "This discards the recount and restores the first count's results for Admin review.", ()=>{
+      items.forEach(it=>{ it.countedQty = (it.firstCountQty!==undefined) ? it.firstCountQty : it.countedQty; delete it.firstCountQty; it.adminTag = it.firstAdminTag||""; delete it.firstAdminTag; });
+      delete session.secondCountSkus;
+      delete session.secondCountTriggeredBy; delete session.secondCountTriggeredAt;
+      session.status = "pending-review";
+      saveModule("ccSessions");
+      renderCycleCount();
+      renderNotifBell();
+      toast("2nd blind count cancelled");
+    }, "Cancel Recount", true);
+  });
+}
+
 function renderSessionDetail(id){
   const session = db.ccSessions.find(s=>s.id===id);
   const el = document.getElementById("content");
   if(!session){ ccViewSessionId=null; renderCycleCount(); return; }
-  if(ccDetailPageSessionId !== session.id){ ccDetailPageSessionId = session.id; ccDetailPage = 0; }
-  const totalPages = Math.max(1, Math.ceil(session.items.length / CC_PAGE_SIZE));
+  if(ccDetailPageSessionId !== session.id){ ccDetailPageSessionId = session.id; ccDetailPage = 0; ccDetailTruckFilter = "All"; }
+  const truckOptions = ["All", ...truckUsersInUse()];
+  const filteredItems = ccDetailTruckFilter==="All" ? session.items : session.items.filter(it => truckUserFirstWord(skuObj(it.sku)?.truckUser) === ccDetailTruckFilter);
+  const totalPages = Math.max(1, Math.ceil(filteredItems.length / CC_PAGE_SIZE));
   if(ccDetailPage >= totalPages) ccDetailPage = totalPages - 1;
   if(ccDetailPage < 0) ccDetailPage = 0;
   const startIdx = ccDetailPage * CC_PAGE_SIZE;
-  const pageItems = session.items.slice(startIdx, startIdx + CC_PAGE_SIZE);
+  const pageItems = filteredItems.slice(startIdx, startIdx + CC_PAGE_SIZE);
   const stats = computeSessionStats(session);
   el.innerHTML = `
     <button class="btn btn-ghost" id="btnBackCC" style="margin-bottom:14px;">← Back to cycle count history</button>
     <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:12px;">
       <p style="margin:0;color:var(--text-dim);font-size:12.5px;">Site: <strong style="color:var(--text);">${esc(siteName(session.site))}</strong></p>
-      <button class="btn" id="btnPrintCCDetail">${icon("file")} Print Count Sheet</button>
+      <button class="btn" id="btnPrintCCDetail" title="${ccDetailTruckFilter!=='All' ? `Prints only Truck User: ${esc(ccDetailTruckFilter)}` : 'Prints all SKUs in this session'}">${icon("file")} Print Count Sheet${ccDetailTruckFilter!=="All" ? ` (${esc(ccDetailTruckFilter)})` : ""}</button>
     </div>
     <div class="kpi-row">
       <div class="kpi good-bar"><div class="label">Accuracy Rate</div><div class="value">${stats.accuracyRate.toFixed(1)}%</div><div class="sub">${stats.matched}/${stats.total} matched</div></div>
@@ -5314,8 +5948,10 @@ function renderSessionDetail(id){
       <div class="kpi accent-bar"><div class="label">Missing/Shortage</div><div class="value">${stats.missingRate.toFixed(1)}%</div><div class="sub">${stats.missing} item(s)</div></div>
     </div>
     <div class="toolbar" style="justify-content:space-between;">
-      <span style="color:var(--text-dim);font-size:12.5px;">Showing ${fmtInt(startIdx+1)}–${fmtInt(Math.min(startIdx+CC_PAGE_SIZE, session.items.length))} of ${fmtInt(session.items.length)} SKU(s)</span>
-      <div style="display:flex;gap:8px;align-items:center;">
+      <span style="color:var(--text-dim);font-size:12.5px;">Showing ${filteredItems.length ? fmtInt(startIdx+1) : 0}–${fmtInt(Math.min(startIdx+CC_PAGE_SIZE, filteredItems.length))} of ${fmtInt(filteredItems.length)} SKU(s)${ccDetailTruckFilter!=="All" ? ` (filtered from ${fmtInt(session.items.length)})` : ""}</span>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+        <label style="font-size:12px;color:var(--text-dim);white-space:nowrap;">Truck User</label>
+        <select class="select-filter" id="ccDetailTruckFilterSelect" style="max-width:220px;">${optionList(truckOptions, ccDetailTruckFilter)}</select>
         <button class="btn" id="btnCCDetailPrevPage" ${ccDetailPage===0?"disabled":""}>← Prev</button>
         <span style="font-size:12.5px;color:var(--text-dim);">Page ${ccDetailPage+1} of ${totalPages}</span>
         <button class="btn" id="btnCCDetailNextPage" ${ccDetailPage>=totalPages-1?"disabled":""}>Next →</button>
@@ -5323,21 +5959,21 @@ function renderSessionDetail(id){
     </div>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>SKU</th><th>Name</th><th>System Qty</th><th>Counted Qty</th><th>Variance</th><th>Remark</th><th>Notes</th></tr></thead>
-        <tbody>${pageItems.map(it=>{
+        <thead><tr><th>SKU</th><th>Name</th><th>Truck User</th>${isAdmin() ? `<th>System Qty</th>` : ""}<th>Counted Qty</th><th>Variance</th></tr></thead>
+        <tbody>${pageItems.length ? pageItems.map(it=>{
           const variance = (parseInt(it.countedQty)||0) - it.systemQty;
           return `<tr>
             <td class="mono">${esc(it.sku)}</td>
             <td>${esc(skuName(it.sku))}</td>
-            <td class="mono">${fmtInt(it.systemQty)}</td>
+            <td>${esc(skuObj(it.sku)?.truckUser||"—")}</td>
+            ${isAdmin() ? `<td class="mono">${fmtInt(it.systemQty)}</td>` : ""}
             <td class="mono">${fmtInt(it.countedQty)}</td>
             <td class="mono" style="color:${variance===0?'var(--good)':'var(--none)'};font-weight:700;">${variance>0?'+':''}${fmtInt(variance)}</td>
-            <td>${badgeRemark(it.remark)}</td>
-            <td>${esc(it.notes)||"—"}</td>
           </tr>`;
-        }).join("")}</tbody>
+        }).join("") : `<tr><td colspan="${isAdmin()?6:5}" style="color:var(--text-faint)">No SKUs match this Truck User filter.</td></tr>`}</tbody>
       </table>
     </div>
+    ${!isAdmin() ? `<p style="color:var(--text-faint);font-size:11.5px;margin-top:8px;">System Qty is hidden — only Admin accounts can view the frozen system quantity for a completed count.</p>` : ""}
     <div class="toolbar" style="justify-content:flex-end;">
       <button class="btn" id="btnCCDetailPrevPage2" ${ccDetailPage===0?"disabled":""}>← Prev</button>
       <span style="font-size:12.5px;color:var(--text-dim);align-self:center;">Page ${ccDetailPage+1} of ${totalPages}</span>
@@ -5345,7 +5981,12 @@ function renderSessionDetail(id){
     </div>
   `;
   document.getElementById("btnBackCC").addEventListener("click", ()=>{ ccViewSessionId=null; renderCycleCount(); });
-  document.getElementById("btnPrintCCDetail").addEventListener("click", ()=>printCycleCountSheet(session));
+  document.getElementById("ccDetailTruckFilterSelect").addEventListener("change",(e)=>{
+    ccDetailTruckFilter = e.target.value;
+    ccDetailPage = 0;
+    renderSessionDetail(id);
+  });
+  document.getElementById("btnPrintCCDetail").addEventListener("click", ()=>printCycleCountSheet(session, ccDetailTruckFilter));
   const gotoPage = (p)=>{ ccDetailPage = p; renderSessionDetail(id); };
   [document.getElementById("btnCCDetailPrevPage"), document.getElementById("btnCCDetailPrevPage2")].forEach(b=>b && b.addEventListener("click", ()=>{ if(ccDetailPage>0) gotoPage(ccDetailPage-1); }));
   [document.getElementById("btnCCDetailNextPage"), document.getElementById("btnCCDetailNextPage2")].forEach(b=>b && b.addEventListener("click", ()=>{ if(ccDetailPage<totalPages-1) gotoPage(ccDetailPage+1); }));
@@ -5436,24 +6077,28 @@ function renderAdjustmentTable(){
 /* ============================================================
    PRINTABLE CYCLE COUNT SHEET
    ============================================================ */
-function printCycleCountSheet(session){
-  const isDone = session.status === "completed";
+function printCycleCountSheet(session, truckFilter){
+  const filterActive = truckFilter && truckFilter!=="All";
+  const isDone = session.status === "completed" || session.status === "pending-review";
+  const showSystemQty = isAdmin();
   const win = window.open("", "_blank", "width=900,height=1000");
   if(!win){ toast("Pop-up blocked — allow pop-ups to print the count sheet"); return; }
-  const rows = [...session.items].sort((a,b)=>String(a.sku).localeCompare(String(b.sku))).map(it=>{
-    const variance = isDone ? (parseInt(it.countedQty)||0) - it.systemQty : null;
+  const itemsToPrint = filterActive ? session.items.filter(it => truckUserFirstWord(skuObj(it.sku)?.truckUser) === truckFilter) : session.items;
+  const rows = [...itemsToPrint].sort((a,b)=>String(a.sku).localeCompare(String(b.sku))).map(it=>{
+    const counted = itemWasCounted(it);
+    const variance = isDone && counted ? (parseInt(it.countedQty)||0) - it.systemQty : null;
     return `
       <tr>
         <td>${esc(it.sku)}</td>
         <td>${esc(skuName(it.sku))}</td>
-        <td class="num">${fmtInt(it.systemQty)}</td>
-        <td class="num">${isDone ? fmtInt(it.countedQty) : "&nbsp;"}</td>
-        <td class="num">${isDone ? `<span style="color:${variance===0?'#1a1a1a':'#c0392b'};font-weight:700;">${variance>0?'+':''}${fmtInt(variance)}</span>` : "&nbsp;"}</td>
-        <td>${isDone ? esc(it.remark)||"—" : "&nbsp;"}</td>
-        <td>${isDone ? esc(it.notes)||"" : "&nbsp;"}</td>
+        <td>${esc(skuObj(it.sku)?.truckUser||"—")}</td>
+        ${showSystemQty ? `<td class="num">${fmtInt(it.systemQty)}</td>` : ""}
+        <td class="num">${isDone ? (counted ? fmtInt(it.countedQty) : `<span style="color:#c0392b;">Not Counted</span>`) : "&nbsp;"}</td>
+        <td class="num">${isDone ? (counted ? `<span style="color:${variance===0?'#1a1a1a':'#c0392b'};font-weight:700;">${variance>0?'+':''}${fmtInt(variance)}</span>` : "&nbsp;") : "&nbsp;"}</td>
       </tr>`;
   }).join("");
   const stats = isDone ? computeSessionStats(session) : null;
+  const liveStats = (session.status==="pending-review") ? computeLiveSessionStats(session) : null;
   const html = `<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><title>Cycle Count Sheet — ${esc(siteName(session.site))}</title>
 <style>
@@ -5492,24 +6137,26 @@ function printCycleCountSheet(session){
   <div class="receipt-head">
     <div>
       <h1>SPX R&amp;M Parts &amp; Asset Inventory</h1>
-      <p>${isDone ? "Cycle Count — Completed Record" : "Cycle Count Sheet — Physical Count Worksheet"}</p>
+      <p>${session.status==="completed" ? "Cycle Count — Approved Record" : session.status==="pending-review" ? "Cycle Count — Pending Admin Review" : "Cycle Count Sheet — Physical Count Worksheet"}${filterActive ? ` — Truck User: ${esc(truckFilter)}` : ""}</p>
     </div>
     <div class="doc-tag">
-      <div class="label">Session #</div>
-      <div class="num">${session.id}</div>
+      <div class="label">Site &amp; Date Frozen</div>
+      <div class="num" style="font-size:15px;">${esc(siteObj(session.site)?.code || siteName(session.site))} · ${esc(session.date)}</div>
     </div>
   </div>
 
   <table class="meta">
     <tr><td class="k">Site</td><td>${esc(siteName(session.site))}</td><td class="k">Date Frozen</td><td>${esc(session.date)}</td></tr>
     <tr><td class="k">Counted By</td><td colspan="3">${esc(session.countedBy)||"&nbsp;"}</td></tr>
-    ${isDone ? `<tr><td class="k">Accuracy Rate</td><td>${stats.accuracyRate.toFixed(1)}%</td><td class="k">Damaged / Unrecorded / Missing</td><td>${stats.damagedRate.toFixed(1)}% / ${stats.unrecordedRate.toFixed(1)}% / ${stats.missingRate.toFixed(1)}%</td></tr>` : ""}
+    ${filterActive ? `<tr><td class="k">Truck User Filter</td><td colspan="3">${esc(truckFilter)} — ${fmtInt(itemsToPrint.length)} of ${fmtInt(session.items.length)} SKU(s)</td></tr>` : ""}
+    ${session.status==="completed" ? `<tr><td class="k">Accuracy Rate</td><td>${stats.accuracyRate.toFixed(1)}%</td><td class="k">Damaged / Unrecorded / Missing</td><td>${stats.damagedRate.toFixed(1)}% / ${stats.unrecordedRate.toFixed(1)}% / ${stats.missingRate.toFixed(1)}%</td></tr>` : ""}
+    ${liveStats ? `<tr><td class="k">Status</td><td colspan="3" style="color:#c0392b;font-weight:600;">Pending Admin Review — not yet finalized or adjusted (${liveStats.discrepancy} of ${liveStats.total} SKU(s) show a discrepancy)</td></tr>` : ""}
   </table>
 
   <table class="items">
-    <thead><tr><th>SKU #</th><th>Description</th><th>System Qty</th><th>Counted Qty</th><th>Variance</th><th>Remark</th><th>Notes</th></tr></thead>
+    <thead><tr><th>SKU #</th><th>Description</th><th>Truck User</th>${showSystemQty ? `<th>System Qty</th>` : ""}<th>Counted Qty</th><th>Variance</th></tr></thead>
     <tbody>
-      ${rows}
+      ${rows || `<tr><td colspan="${showSystemQty?6:5}" style="text-align:center;color:#888;">No SKUs match this Truck User filter.</td></tr>`}
     </tbody>
   </table>
 
@@ -5524,7 +6171,7 @@ function printCycleCountSheet(session){
     </div>
   </div>
 
-  <div class="footnote">${isDone ? "This is a printed record of a completed cycle count." : "Fill in Counted Qty, Remark, and Notes by hand for each line, then submit for encoding."} Generated ${esc(nowTimestamp())}.</div>
+  <div class="footnote">${session.status==="completed" ? "This is a printed record of an Admin-approved cycle count." : session.status==="pending-review" ? "This reflects the submitted count, pending Admin review — not yet finalized or adjusted in stock." : "Fill in Counted Qty by hand for each line, then submit for encoding."} Generated ${esc(nowTimestamp())}.</div>
 </body>
 </html>`;
   win.document.open();
@@ -5542,12 +6189,12 @@ let repoDateTo = "";
 let repoCategoryFilter = "All";
 function getSkuHistory(skuId){
   const events = [];
-  scopedReceiving().filter(r=>r.sku===skuId).forEach(r=>events.push({date:r.date, type:"Receiving", qty:r.qty, ref:r.batch||("Supplier: "+r.supplier), by:r.receiver||"—", notes:r.supplier, site:r.site}));
+  scopedReceiving().filter(r=>r.sku===skuId).forEach(r=>events.push({date:r.date, type:"Receiving", qty:r.qty, ref:r.batch||("Supplier: "+r.supplier), by:r.receiver||"—", notes:r.supplier + (r.po?` · PO ${r.po}`:""), site:r.site}));
   scopedWithdrawals().filter(w=>w.sku===skuId).forEach(w=>events.push({date:w.date, type:"Withdrawal", qty:-w.qty, ref:w.wo, by:w.releasedBy||"—", notes:`Plate ${w.plate} · ${w.requestor}`, site:w.site}));
   scopedReturns().filter(r=>r.sku===skuId).forEach(r=>events.push({date:r.date, type:r.type==="Unused Return"?"Return (In)":"Return (Out)", qty:r.type==="Unused Return"?r.qty:-r.qty, ref:r.ref||"—", by:r.returnedBy||"—", notes:r.reason + (r.notes?" — "+r.notes:""), site:r.site}));
   scopedCcSessions().forEach(s=>{
     s.items.filter(i=>i.sku===skuId && s.status==="completed").forEach(i=>{
-      events.push({date:s.date, type:"Cycle Count", qty:(parseInt(i.countedQty)||0)-i.systemQty, ref:"Session #"+s.id, by:s.countedBy||"—", notes:i.remark, site:s.site});
+      events.push({date:s.date, type:"Cycle Count", qty:(parseInt(i.countedQty)||0)-i.systemQty, ref:`${siteObj(s.site)?.code || siteName(s.site)} · ${s.date}`, by:s.countedBy||"—", notes:i.remark, site:s.site});
     });
   });
   scopedTransfers().filter(t=>t.sku===skuId).forEach(t=>{
@@ -5559,7 +6206,7 @@ function getSkuHistory(skuId){
       // Not actually in the To Site's stock until Received, so the qty
       // change is 0 while In-Transit — the line still shows up so it's
       // visible as pending, it just doesn't move on-hand yet.
-      events.push({date:received ? (t.receivedDate||t.date) : t.date, type:"Transfer In", qty:received ? t.qty : 0, ref:`From ${siteName(t.fromSite)} (${transferStatusLabel(t, t.toSite)})`, by:t.transferredBy||"—", notes:t.notes, site:t.toSite});
+      events.push({date:received ? (t.receivedDate||t.date) : t.date, type:"Transfer In", qty:received ? transferReceivedQty(t) : 0, ref:`From ${siteName(t.fromSite)} (${transferStatusLabel(t, t.toSite)})`, by:t.transferredBy||"—", notes:(t.notes||"") + (hasTransferDiscrepancy(t) ? ` · Discrepancy: received ${fmtInt(transferReceivedQty(t))} of ${fmtInt(t.qty)} — ${t.receivedRemarks||""}` : ""), site:t.toSite});
     }
   });
   return events.sort((a,b)=>b.date.localeCompare(a.date));
@@ -6709,11 +7356,14 @@ function renderExport(){
 function exportModule(key){
   const scopeTag = isOverall() ? "overall" : (siteObj(currentSite)?.code || currentSite);
   if(key==="skus"){
-    downloadCSV("sku_catalog.csv", ["SKU#","Name","Category","UoM","Cost","TruckUser","ReorderQty","OnHand","Status"],
-      db.skus.map(s=>[s.id,s.name,s.category,s.uom,s.cost,s.truckUser||"",s.reorder,stockStatus(s.id).qty,stockStatus(s.id).label]));
+    downloadCSV("sku_catalog.csv", ["SKU#","Name","Category","UoM","CostPerPc","LatestBatch#","CatalogCost","TruckUser","ReorderQty","OnHand","Status"],
+      db.skus.map(s=>{
+        const latest = latestReceivingRecord(s.id);
+        return [s.id,s.name,s.category,s.uom,displaySkuCost(s.id),latest?latest.batch:"",s.cost,s.truckUser||"",s.reorder,stockStatus(s.id).qty,stockStatus(s.id).label];
+      }));
   } else if(key==="receiving"){
-    downloadCSV(`receiving_log_${scopeTag}.csv`, ["Site","Date","LoggedAt","Supplier","SKU","Qty","CostPerUnit","DeliveryDate","BatchNumber","Receiver"],
-      scopedReceiving().map(r=>[siteName(r.site),r.date,r.timestamp,r.supplier,r.sku,r.qty,r.cost,r.delivery,r.batch,r.receiver]));
+    downloadCSV(`receiving_log_${scopeTag}.csv`, ["Site","Date","LoggedAt","Supplier","PONumber","SKU","SKUName","Qty","CostPerUnit","DeliveryDate","BatchNumber","Receiver"],
+      scopedReceiving().map(r=>[siteName(r.site),r.date,r.timestamp,r.supplier,r.po||"",r.sku,skuName(r.sku),r.qty,r.cost,r.delivery,r.batch,r.receiver]));
   } else if(key==="requests"){
     const rows = [];
     scopedRequests().forEach(r=>{
@@ -6729,8 +7379,8 @@ function exportModule(key){
     downloadCSV(`returns_log_${scopeTag}.csv`, ["Site","Date","LoggedAt","Type","SKU","Qty","CostPerUnit","Total","Reference","Supplier","Reason","Condition","ReturnedBy","Notes"],
       scopedReturns().map(r=>[siteName(r.site),r.date,r.timestamp,r.type,r.sku,r.qty,r.cost,r.cost*r.qty,r.ref,r.supplier,r.reason,r.condition,r.returnedBy,r.notes]));
   } else if(key==="transfers"){
-    downloadCSV(`transfer_log_${scopeTag}.csv`, ["Date","LoggedAt","SKU","Qty","CostPerUnit","FromSite","ToSite","Status","ReceivedDate","TransferredBy","Notes"],
-      scopedTransfers().map(t=>[t.date,t.timestamp,t.sku,t.qty,t.cost,siteName(t.fromSite),siteName(t.toSite),isTransferReceived(t)?"Received":"In-Transit",t.receivedDate||"",t.transferredBy,t.notes]));
+    downloadCSV(`transfer_log_${scopeTag}.csv`, ["Date","LoggedAt","SKU","QtyDispatched","QtyReceived","CostPerUnit","FromSite","ToSite","Status","ReceivedDate","ReceivedRemarks","TransferredBy","Notes"],
+      scopedTransfers().map(t=>[t.date,t.timestamp,t.sku,t.qty,isTransferReceived(t)?transferReceivedQty(t):"",t.cost,siteName(t.fromSite),siteName(t.toSite),transferStatusLabel(t,t.toSite),t.receivedDate||"",t.receivedRemarks||"",t.transferredBy,t.notes]));
   } else if(key==="summary"){
     downloadCSV(`stock_summary_${scopeTag}.csv`, ["SKU#","Name","Category","Received","Withdrawn","OnHand","ReorderQty","Status"],
       db.skus.map(s=>{
