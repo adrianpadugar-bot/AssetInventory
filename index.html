@@ -1166,6 +1166,7 @@ document.getElementById("hambBtn").addEventListener("click", ()=>{
 function fmtMoney(n){ return "₱" + Number(n||0).toLocaleString("en-PH",{minimumFractionDigits:2,maximumFractionDigits:2}); }
 function fmtInt(n){ return Number(n||0).toLocaleString("en-PH"); }
 function skuName(id){ const s = db.skus.find(x=>x.id===id); return s ? s.name : id; }
+function skuCategory(id){ const s = db.skus.find(x=>x.id===id); return s ? (s.category||"Uncategorized") : ""; }
 function skuObj(id){ return db.skus.find(x=>x.id===id); }
 function esc(s){ return String(s==null?"":s).replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
 function todayStr(){ return new Date().toISOString().slice(0,10); }
@@ -1750,6 +1751,12 @@ function truckUserFirstWord(truckUser){
 function truckUsersInUse(){
   return [...new Set(db.skus.map(s=>truckUserFirstWord(s.truckUser)).filter(Boolean))].sort((a,b)=>a.localeCompare(b));
 }
+/* Exact Truck User values (not brand-grouped like truckUsersInUse()
+   above) currently present on SKUs — used for the SKU Catalog's own
+   Filters panel, where the full spec is more useful than just brand. */
+function skuTruckUsersInUse(){
+  return [...new Set(db.skus.map(s=>s.truckUser).filter(Boolean))].sort((a,b)=>a.localeCompare(b));
+}
 function rosterOptionList(role, selected){
   const people = db.roster.filter(r=>r.roles.includes(role));
   if(!people.length) return `<option value="">No contacts enrolled for ${esc(role)} — add in Roster</option>`;
@@ -1996,7 +2003,7 @@ function dashDateFilterLabel(){
 function renderDashboard(){
   const el = document.getElementById("content");
   const totalSkus = db.skus.length;
-  const stockValue = db.skus.reduce((a,s)=>a + onHand(s.id) * Number(s.cost), 0);
+  const stockValue = db.skus.reduce((a,s)=>a + skuStockValue(s.id), 0);
   let good=0, crit=0, none=0;
   db.skus.forEach(s=>{ const st = stockStatus(s.id).cls; if(st==='good')good++; else if(st==='critical')crit++; else if(st==='none')none++; });
 
@@ -2010,7 +2017,7 @@ function renderDashboard(){
 
   const catValue = {};
   CATEGORIES.forEach(c=>catValue[c]=0);
-  db.skus.forEach(s=>{ catValue[s.category] = (catValue[s.category]||0) + onHand(s.id)*Number(s.cost); });
+  db.skus.forEach(s=>{ catValue[s.category] = (catValue[s.category]||0) + skuStockValue(s.id); });
   const maxCat = Math.max(1, ...Object.values(catValue));
 
   const recentReceiving = [...scopedReceiving()].filter(r=>dashInRange(r.date)).sort((a,b)=>b.date.localeCompare(a.date)).slice(0,4);
@@ -2049,7 +2056,7 @@ function renderDashboard(){
   }
   const deadStock = db.skus
     .filter(s=>onHand(s.id) > 0)
-    .map(s=>{ const last = lastTransactionDate(s.id); return {sku:s.id, name:s.name, qty:onHand(s.id), value:onHand(s.id)*Number(s.cost), lastDate:last}; })
+    .map(s=>{ const last = lastTransactionDate(s.id); return {sku:s.id, name:s.name, qty:onHand(s.id), value:skuStockValue(s.id), lastDate:last}; })
     .filter(d=> !d.lastDate || d.lastDate < deadStockCutoff)
     .sort((a,b)=> b.value-a.value)
     .slice(0,10);
@@ -2089,7 +2096,7 @@ function renderDashboard(){
   const kpiHtml = `
     <div class="kpi-row">
       <div class="kpi accent-bar clickable" data-kpi="total" title="Click to view SKU Catalog"><div class="label">Total SKUs</div><div class="value">${fmtInt(totalSkus)}</div><div class="sub">Active part numbers</div></div>
-      <div class="kpi accent-bar clickable" data-kpi="value" title="Click to view Stock Summary"><div class="label">Stock Value</div><div class="value" style="font-size:24px;">${fmtMoney(stockValue)}</div><div class="sub">On-hand qty × unit cost</div></div>
+      <div class="kpi accent-bar clickable" data-kpi="value" title="Click to view Stock Summary"><div class="label">Stock Value</div><div class="value" style="font-size:24px;">${fmtMoney(stockValue)}</div><div class="sub">Remaining qty × each batch's cost</div></div>
       <div class="kpi crit-bar clickable" data-kpi="critical" title="Click to filter Critical items"><div class="label">Critical Items</div><div class="value">${fmtInt(crit)}</div><div class="sub">At or below reorder qty</div></div>
       <div class="kpi none-bar clickable" data-kpi="none" title="Click to filter No Stock items"><div class="label">No Stock</div><div class="value">${fmtInt(none)}</div><div class="sub">Zero or negative on-hand</div></div>
       <div class="kpi crit-bar clickable" data-kpi="unserved" title="Click to view Parts Requests"><div class="label">Unserved Requests</div><div class="value">${fmtInt(unserved)}</div><div class="sub">Pending or Approved, not yet served</div></div>
@@ -2278,23 +2285,86 @@ function renderDashboard(){
 let skuEditId = null;
 let skuSearch = "";
 let skuSelected = new Set();
+let skuFilterCategory = "All";
+let skuFilterTruck = "All";
+let skuFilterStatus = "All";
+function skuActiveFilterCount(){
+  return (skuFilterCategory!=="All"?1:0) + (skuFilterTruck!=="All"?1:0) + (skuFilterStatus!=="All"?1:0);
+}
 function renderSku(){
   const el = document.getElementById("content");
+  const activeFilters = skuActiveFilterCount();
   el.innerHTML = `
     <div class="toolbar">
       <button class="btn btn-accent" id="btnAddSku">${icon("plus")} Add SKU</button>
       <button class="btn" id="btnBulkSku">${icon("file")} Bulk Upload</button>
       <button class="btn" id="btnPrintAllQr">${icon("qrcode")} Print QR Labels</button>
+      <button class="btn" id="btnToggleSkuFilters">${icon("layers")} Filters${activeFilters ? ` (${activeFilters})` : ""}</button>
       <div class="spacer"></div>
       <div class="search-box">${icon("search")}<input id="skuSearchInput" placeholder="Search SKU or name..." value="${esc(skuSearch)}"></div>
+    </div>
+
+    <div class="form-panel" id="skuFilterPanel">
+      <div class="form-grid cols-3">
+        <div class="field">
+          <label>Category</label>
+          <select id="skuFilterCategorySelect">${optionList(["All", ...skuCategoriesInUse()], skuFilterCategory)}</select>
+        </div>
+        <div class="field">
+          <label>Truck User</label>
+          <select id="skuFilterTruckSelect">${optionList(["All", ...skuTruckUsersInUse()], skuFilterTruck)}</select>
+        </div>
+        <div class="field">
+          <label>Status</label>
+          <select id="skuFilterStatusSelect">${optionList(["All","Good","Critical","No Stock","Not Stocked"], skuFilterStatus)}</select>
+        </div>
+      </div>
+      <div class="form-actions">
+        <button class="btn btn-ghost" id="btnClearSkuFilters">Clear Filters</button>
+      </div>
     </div>
 
     <div class="bulk-bar" id="skuBulkBar">
       <span><strong id="skuSelectedCount">0</strong> SKU(s) selected</span>
       <div class="spacer"></div>
       <button class="btn" id="btnClearSkuSelection">Clear</button>
+      <button class="btn" id="btnBulkEditSku">${icon("edit")} Bulk Edit Selected</button>
       <button class="btn" id="btnPrintSelectedQr">${icon("qrcode")} Print QR for Selected</button>
       <button class="btn btn-danger" id="btnDeleteSelectedSku">${icon("trash")} Delete Selected</button>
+    </div>
+
+    <div class="form-panel" id="bulkEditFormPanel">
+      <div class="section-head" style="margin-bottom:12px;">
+        <h3 style="font-size:16px;">Bulk Edit Selected SKUs</h3>
+        <p>Check which field(s) to update, set the new value, then apply to every selected SKU. Unchecked fields are left as-is.</p>
+      </div>
+      <div class="form-grid cols-2">
+        <div class="field">
+          <label class="checkbox-row"><input type="checkbox" id="bulkEditCatChk"> Category</label>
+          <select id="bulkEditCatValue" disabled>${optionList(CATEGORIES)}</select>
+        </div>
+        <div class="field">
+          <label class="checkbox-row"><input type="checkbox" id="bulkEditUomChk"> Unit of Measurement</label>
+          <select id="bulkEditUomValue" disabled>${optionList(UOMS)}</select>
+        </div>
+        <div class="field">
+          <label class="checkbox-row"><input type="checkbox" id="bulkEditTruckChk"> Truck User</label>
+          <select id="bulkEditTruckValue" disabled>${truckOptionList()}</select>
+        </div>
+        <div class="field">
+          <label class="checkbox-row"><input type="checkbox" id="bulkEditReorderChk"> Reorder Quantity</label>
+          <input id="bulkEditReorderValue" type="number" min="0" placeholder="0" disabled>
+        </div>
+        <div class="field" style="grid-column:1 / -1;">
+          <label class="checkbox-row"><input type="checkbox" id="bulkEditCostChk"> Cost per Piece (₱)</label>
+          <input id="bulkEditCostValue" type="number" min="0" step="0.01" placeholder="0.00" disabled>
+          <div class="field-note">Updates the catalog's manually-set cost — used as a fallback for SKUs with no receiving history yet, and to pre-fill new entry forms. It won't change the "latest batch" cost shown in the table for SKUs that have already been received.</div>
+        </div>
+      </div>
+      <div class="form-actions">
+        <button class="btn btn-accent" id="btnApplyBulkEdit">Apply to Selected</button>
+        <button class="btn btn-ghost" id="btnCancelBulkEdit">Cancel</button>
+      </div>
     </div>
 
     <div class="form-panel" id="skuFormPanel">
@@ -2342,7 +2412,7 @@ ENG-045,Air Filter,Filters,Piece,320,All Brands All Sizes,30"></textarea>
       <table>
         <thead><tr>
           <th style="width:34px;"><input type="checkbox" id="skuSelectAll" title="Select all"></th>
-          <th>SKU #</th><th>Name</th><th>Category</th><th>UoM</th><th title="Cost from the latest received batch — falls back to the catalog cost if never received">Cost/pc</th><th>Truck User</th><th>Reorder Qty</th><th>On Hand</th><th>Status</th><th></th>
+          <th>SKU #</th><th>Name</th><th>Category</th><th>UoM</th><th title="Cost from the latest received batch — falls back to the catalog cost if never received">Cost/pc</th><th>Truck User</th><th>Reorder Qty</th><th>On Hand</th><th>Status</th><th title="When this SKU record was last created or edited">Last Edited</th><th></th>
         </tr></thead>
         <tbody id="skuTbody"></tbody>
       </table>
@@ -2365,6 +2435,22 @@ ENG-045,Air Filter,Filters,Piece,320,All Brands All Sizes,30"></textarea>
     if(skuSelected.size===0){ toast("Select at least one SKU first"); return; }
     printSkuQrLabels(Array.from(skuSelected));
   });
+  document.getElementById("btnBulkEditSku").addEventListener("click", ()=>{
+    if(skuSelected.size===0){ toast("Select at least one SKU first"); return; }
+    document.getElementById("skuFormPanel").classList.remove("open");
+    document.getElementById("bulkFormPanel").classList.remove("open");
+    document.getElementById("bulkEditFormPanel").classList.add("open");
+    document.getElementById("bulkEditFormPanel").scrollIntoView({behavior:"smooth", block:"nearest"});
+  });
+  document.getElementById("btnCancelBulkEdit").addEventListener("click", ()=>{
+    document.getElementById("bulkEditFormPanel").classList.remove("open");
+  });
+  [["bulkEditCatChk","bulkEditCatValue"],["bulkEditUomChk","bulkEditUomValue"],["bulkEditTruckChk","bulkEditTruckValue"],["bulkEditReorderChk","bulkEditReorderValue"],["bulkEditCostChk","bulkEditCostValue"]].forEach(([chkId,valId])=>{
+    document.getElementById(chkId).addEventListener("change", (e)=>{
+      document.getElementById(valId).disabled = !e.target.checked;
+    });
+  });
+  document.getElementById("btnApplyBulkEdit").addEventListener("click", applyBulkEditSku);
   document.getElementById("btnTemplate").addEventListener("click", ()=>{
     downloadCSV("sku_template.csv", ["SKU#","Name","Category","UoM","Cost","TruckUser","ReorderQty"], [["BRK-020","Wheel Cylinder","Brakes","Piece","410","Isuzu 10-Wheeler","10"]]);
   });
@@ -2381,6 +2467,30 @@ ENG-045,Air Filter,Filters,Piece,320,All Brands All Sizes,30"></textarea>
     reader.readAsText(file);
   });
   document.getElementById("skuSearchInput").addEventListener("input", (e)=>{ skuSearch = e.target.value; renderSkuTable(); });
+
+  document.getElementById("btnToggleSkuFilters").addEventListener("click", ()=>{
+    document.getElementById("skuFilterPanel").classList.toggle("open");
+  });
+  document.getElementById("skuFilterCategorySelect").addEventListener("change", (e)=>{
+    skuFilterCategory = e.target.value;
+    renderSku();
+    document.getElementById("skuFilterPanel").classList.add("open");
+  });
+  document.getElementById("skuFilterTruckSelect").addEventListener("change", (e)=>{
+    skuFilterTruck = e.target.value;
+    renderSku();
+    document.getElementById("skuFilterPanel").classList.add("open");
+  });
+  document.getElementById("skuFilterStatusSelect").addEventListener("change", (e)=>{
+    skuFilterStatus = e.target.value;
+    renderSku();
+    document.getElementById("skuFilterPanel").classList.add("open");
+  });
+  document.getElementById("btnClearSkuFilters").addEventListener("click", ()=>{
+    skuFilterCategory = "All"; skuFilterTruck = "All"; skuFilterStatus = "All";
+    renderSku();
+    document.getElementById("skuFilterPanel").classList.add("open");
+  });
 
   document.getElementById("skuSelectAll").addEventListener("change", (e)=>{
     filteredSkus().forEach(s => e.target.checked ? skuSelected.add(s.id) : skuSelected.delete(s.id));
@@ -2406,7 +2516,46 @@ ENG-045,Air Filter,Filters,Piece,320,All Brands All Sizes,30"></textarea>
 }
 function filteredSkus(){
   const q = skuSearch.trim().toLowerCase();
-  return db.skus.filter(s => !q || s.id.toLowerCase().includes(q) || s.name.toLowerCase().includes(q));
+  return db.skus.filter(s => {
+    if(q && !(s.id.toLowerCase().includes(q) || s.name.toLowerCase().includes(q))) return false;
+    if(skuFilterCategory!=="All" && s.category!==skuFilterCategory) return false;
+    if(skuFilterTruck!=="All" && (s.truckUser||"")!==skuFilterTruck) return false;
+    if(skuFilterStatus!=="All" && stockStatus(s.id).label!==skuFilterStatus) return false;
+    return true;
+  });
+}
+/* Applies a bulk update to every currently-selected SKU. Only fields
+   whose checkbox is checked are touched — unchecked fields are left
+   exactly as they were on each SKU, so a partial update (e.g. just
+   Reorder Qty) never accidentally clobbers Category, Truck User, etc. */
+function applyBulkEditSku(){
+  if(skuSelected.size===0){ toast("No SKUs selected"); return; }
+  const changes = {};
+  if(document.getElementById("bulkEditCatChk").checked) changes.category = document.getElementById("bulkEditCatValue").value;
+  if(document.getElementById("bulkEditUomChk").checked) changes.uom = document.getElementById("bulkEditUomValue").value;
+  if(document.getElementById("bulkEditTruckChk").checked) changes.truckUser = document.getElementById("bulkEditTruckValue").value;
+  if(document.getElementById("bulkEditReorderChk").checked) changes.reorder = parseInt(document.getElementById("bulkEditReorderValue").value)||0;
+  if(document.getElementById("bulkEditCostChk").checked) changes.cost = parseFloat(document.getElementById("bulkEditCostValue").value)||0;
+
+  if(Object.keys(changes).length===0){ toast("Check at least one field to update"); return; }
+
+  const count = skuSelected.size;
+  const fieldLabels = {category:"Category", uom:"Unit of Measurement", truckUser:"Truck User", reorder:"Reorder Quantity", cost:"Cost per Piece"};
+  const reviewFields = [
+    {label:"SKUs to update", value:count},
+    ...Object.entries(changes).map(([k,v])=>({label:fieldLabels[k], value: k==="cost" ? fmtMoney(v) : (v||"—")})),
+  ];
+  openReviewConfirm("Confirm Bulk Edit — Is this accurate?", reviewFields, ()=>{
+    const ts = nowTimestamp();
+    const by = currentUser ? currentUser.name : "—";
+    db.skus.forEach(s=>{
+      if(skuSelected.has(s.id)) Object.assign(s, changes, {lastEdited: ts, lastEditedBy: by});
+    });
+    saveModule("skus");
+    document.getElementById("bulkEditFormPanel").classList.remove("open");
+    renderSkuTable();
+    toast(`${count} SKU(s) updated`);
+  });
 }
 function updateSkuBulkBar(){
   const bar = document.getElementById("skuBulkBar");
@@ -2431,7 +2580,7 @@ function renderSkuTable(){
   // drop selections for SKUs that no longer exist (e.g. deleted individually)
   skuSelected.forEach(id => { if(!db.skus.some(s=>s.id===id)) skuSelected.delete(id); });
   if(rows.length===0){
-    tbody.innerHTML = `<tr><td colspan="12"><div class="empty-state">${icon("box")}<p>No SKUs match your search.</p></div></td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="13"><div class="empty-state">${icon("box")}<p>No SKUs match your search${skuActiveFilterCount() ? " or filters" : ""}.</p></div></td></tr>`;
     updateSkuBulkBar();
     return;
   }
@@ -2442,6 +2591,10 @@ function renderSkuTable(){
     const costTitle = latestRec
       ? `Latest cost from batch ${latestRec.batch||"—"}, received ${latestRec.date}${isOverall()?"":` at ${esc(siteName(latestRec.site))}`}`
       : `No receiving history yet — showing catalog cost`;
+    const editTitle = [
+      s.createdBy || s.createdAt ? `Created by ${s.createdBy||"—"}${s.createdAt?` on ${s.createdAt}`:""}` : `Created by — (record predates edit tracking)`,
+      s.lastEditedBy || s.lastEdited ? `Last edited by ${s.lastEditedBy||"—"}${s.lastEdited?` on ${s.lastEdited}`:""}` : `Not edited since creation`,
+    ].join("\n");
     return `<tr>
       <td><input type="checkbox" class="sku-row-check" data-id="${esc(s.id)}" ${skuSelected.has(s.id)?"checked":""}></td>
       <td class="mono">${esc(s.id)}</td>
@@ -2453,6 +2606,7 @@ function renderSkuTable(){
       <td class="mono">${fmtInt(s.reorder)}</td>
       <td class="mono">${fmtInt(st.qty)}</td>
       <td>${badge(st)}</td>
+      <td class="mono" style="white-space:nowrap;cursor:help;" title="${esc(editTitle)}">${esc(s.lastEdited)||"—"}</td>
       <td>
         <button class="icon-btn" data-qr="${esc(s.id)}" title="View / Print QR">${icon("qrcode")}</button>
         <button class="icon-btn" data-edit="${esc(s.id)}" title="Edit">${icon("edit")}</button>
@@ -2843,12 +2997,14 @@ function skuBatchLedger(skuId, siteId){
   recs.sort((a,b)=> String(a.timestamp||a.date).localeCompare(String(b.timestamp||b.date)) || (a.id-b.id));
   const order = [];
   const totals = {};
+  const costTotals = {}; // sum of qty*cost per batch, for a qty-weighted average cost
   recs.forEach(r=>{
     const b = r.batch || "—";
-    if(!(b in totals)){ totals[b]=0; order.push(b); }
+    if(!(b in totals)){ totals[b]=0; costTotals[b]=0; order.push(b); }
     totals[b] += Number(r.qty)||0;
+    costTotals[b] += (Number(r.qty)||0) * (Number(r.cost)||0);
   });
-  return order.map(b=>({batch:b, received:totals[b]}));
+  return order.map(b=>({batch:b, received:totals[b], cost: totals[b]>0 ? costTotals[b]/totals[b] : 0}));
 }
 function batchWithdrawnQty(skuId, siteId, batch, excludeId){
   return db.withdrawals
@@ -2858,12 +3014,32 @@ function batchWithdrawnQty(skuId, siteId, batch, excludeId){
 function batchRemainingList(skuId, siteId, excludeId){
   return skuBatchLedger(skuId, siteId).map(b=>{
     const withdrawn = batchWithdrawnQty(skuId, siteId, b.batch, excludeId);
-    return {batch:b.batch, received:b.received, withdrawn, remaining:b.received-withdrawn};
+    return {batch:b.batch, received:b.received, withdrawn, remaining:b.received-withdrawn, cost:b.cost};
   });
 }
 function pickOldestBatch(skuId, siteId, excludeId){
   const list = batchRemainingList(skuId, siteId, excludeId);
   return list.find(b=>b.remaining>0) || null;
+}
+/* Total value of remaining on-hand stock for one SKU at one site, priced
+   per-batch (each batch's own received cost, not the flat SKU catalog
+   cost) — sum of (remaining qty × that batch's cost) across every batch
+   still holding stock. Used by the Dashboard's Stock Value figures so
+   valuation reflects what was actually paid, batch by batch (FIFO). */
+function skuBatchValue(skuId, siteId){
+  return batchRemainingList(skuId, siteId, null).reduce((a,b)=> a + Math.max(0,b.remaining)*b.cost, 0);
+}
+/* Same as skuBatchValue() but respects the page's current site selector —
+   "Overall" sums the per-batch value across every site that has ever
+   received this SKU (mirrors how onHand()/scopedReceiving() treat
+   "Overall" as unfiltered rather than active-sites-only), otherwise it's
+   just the currently selected site. */
+function skuStockValue(skuId){
+  if(isOverall()){
+    const siteIds = [...new Set(db.receiving.filter(r=>r.sku===skuId).map(r=>String(r.site)))];
+    return siteIds.reduce((a,siteId)=>a + skuBatchValue(skuId, siteId), 0);
+  }
+  return skuBatchValue(skuId, currentSite);
 }
 
 function matchSkuFromScan(raw){
@@ -2918,7 +3094,15 @@ function saveSku(){
   ], ()=>commitSku(rec));
 }
 function commitSku(rec){
+  const ts = nowTimestamp();
+  const by = currentUser ? currentUser.name : "—";
   const existingIdx = db.skus.findIndex(s=>s.id===rec.id);
+  const isNew = !skuEditId && existingIdx<0;
+  const prior = skuEditId ? db.skus.find(s=>s.id===skuEditId) : (existingIdx>=0 ? db.skus[existingIdx] : null);
+  rec.createdBy = isNew ? by : (prior ? (prior.createdBy||by) : by);
+  rec.createdAt = isNew ? ts : (prior ? (prior.createdAt||ts) : ts);
+  rec.lastEditedBy = by;
+  rec.lastEdited = ts;
   if(skuEditId){
     const idx = db.skus.findIndex(s=>s.id===skuEditId);
     db.skus[idx] = rec;
@@ -3017,8 +3201,15 @@ function reviewBulkSku(){
 }
 function commitBulkSku(rows){
   let count = 0;
+  const ts = nowTimestamp();
+  const by = currentUser ? currentUser.name : "—";
   rows.forEach(rec=>{
     const idx = db.skus.findIndex(s=>s.id===rec.id);
+    const prior = idx>=0 ? db.skus[idx] : null;
+    rec.createdBy = prior ? (prior.createdBy||by) : by;
+    rec.createdAt = prior ? (prior.createdAt||ts) : ts;
+    rec.lastEditedBy = by;
+    rec.lastEdited = ts;
     if(idx>=0) db.skus[idx]=rec; else db.skus.push(rec);
     count++;
   });
@@ -3050,6 +3241,7 @@ function filteredReceiving(){
   return rows.filter(r =>
     String(r.sku||"").toLowerCase().includes(q) ||
     skuName(r.sku).toLowerCase().includes(q) ||
+    skuCategory(r.sku).toLowerCase().includes(q) ||
     String(r.supplier||"").toLowerCase().includes(q) ||
     String(r.po||"").toLowerCase().includes(q) ||
     String(r.batch||"").toLowerCase().includes(q) ||
@@ -3142,7 +3334,7 @@ MYC,XYZ Supply,,ENG-045,50,320,2026-07-28,,"></textarea>
 
     <div class="table-wrap">
       <table>
-        <thead><tr><th style="width:34px;"><input type="checkbox" id="recSelectAll" title="Select all"></th><th>Site</th><th>Date</th><th>Logged At</th><th>Supplier</th><th>PO #</th><th>SKU #</th><th>SKU Name</th><th>Qty</th><th>Cost/Unit</th><th>Delivery</th><th>Batch #</th><th>Receiver</th><th></th></tr></thead>
+        <thead><tr><th style="width:34px;"><input type="checkbox" id="recSelectAll" title="Select all"></th><th>Site</th><th>Date</th><th>Logged At</th><th>Supplier</th><th>PO #</th><th>SKU #</th><th>SKU Name</th><th>Category</th><th>Qty</th><th>Cost/Unit</th><th>Delivery</th><th>Batch #</th><th>Receiver</th><th></th></tr></thead>
         <tbody id="recTbody"></tbody>
       </table>
     </div>
@@ -3456,7 +3648,7 @@ function renderRecTable(){
   }
   if(rows.length===0){
     const filtered = recSearch.trim() || recDateFilter!=="all";
-    tbody.innerHTML = `<tr><td colspan="14"><div class="empty-state">${icon("in")}<p>${filtered ? "No receiving records match your search/filter." : `No receiving records ${isOverall()?"yet":"for this site yet"}.`}</p></div></td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="15"><div class="empty-state">${icon("in")}<p>${filtered ? "No receiving records match your search/filter." : `No receiving records ${isOverall()?"yet":"for this site yet"}.`}</p></div></td></tr>`;
     return;
   }
   tbody.innerHTML = [...rows].sort((a,b)=>b.date.localeCompare(a.date)).map(r=>`
@@ -3469,6 +3661,7 @@ function renderRecTable(){
       <td class="mono">${esc(r.po)||"—"}</td>
       <td class="mono">${esc(r.sku)}</td>
       <td>${esc(skuName(r.sku))}</td>
+      <td><span class="pill">${esc(skuCategory(r.sku))}</span></td>
       <td class="mono">${fmtInt(r.qty)}</td>
       <td class="mono">${fmtMoney(r.cost)}</td>
       <td class="mono">${r.delivery||"—"}</td>
@@ -3515,6 +3708,7 @@ function filteredWithdrawals(){
   return rows.filter(w =>
     String(w.sku||"").toLowerCase().includes(q) ||
     skuName(w.sku).toLowerCase().includes(q) ||
+    skuCategory(w.sku).toLowerCase().includes(q) ||
     String(w.wo||"").toLowerCase().includes(q) ||
     String(w.plate||"").toLowerCase().includes(q) ||
     String(w.requestor||"").toLowerCase().includes(q) ||
@@ -3533,6 +3727,7 @@ function refreshWdBatchPick(){
   const siteEl = document.getElementById("f_wd_site");
   const batchEl = document.getElementById("f_wd_batch");
   const note = document.getElementById("wdBatchAvailNote");
+  const costEl = document.getElementById("f_wd_cost");
   if(!skuEl || !siteEl || !batchEl) return;
   const picked = pickOldestBatch(skuEl.value, siteEl.value, withdrawalEditId || null);
   wdPickedBatch = picked;
@@ -3540,10 +3735,13 @@ function refreshWdBatchPick(){
     batchEl.value = picked.batch;
     note.textContent = `Oldest available batch for this SKU/site — ${fmtInt(picked.remaining)} unit(s) remaining.`;
     note.style.color = "";
+    if(costEl && !costEl.dataset.touched) costEl.value = Math.round(picked.cost*100)/100;
   } else {
     batchEl.value = "";
     note.textContent = "No available stock for this SKU at the selected site — nothing to withdraw.";
     note.style.color = "var(--none)";
+    const s = skuObj(skuEl.value);
+    if(costEl && !costEl.dataset.touched) costEl.value = s ? s.cost : "";
   }
   enforceWdQtyLimit();
 }
@@ -3600,6 +3798,7 @@ function renderWithdrawal(){
         <div class="field"><label>Plate #</label><input id="f_wd_plate" placeholder="e.g. NGP 2231"></div>
         <div class="field"><label>Requestor</label><select id="f_wd_requestor">${rosterOptionList("Requestor")}</select></div>
         <div class="field"><label>SKU</label><select id="f_wd_sku">${skuOptionList()}</select></div>
+        <div class="field"><label>Part Name</label><input id="f_wd_partname" readonly><div class="field-note">Reflects the name of the selected SKU</div></div>
         <div class="field">
           <label>Quantity</label>
           <div class="qty-mode-toggle" id="qtyModeToggleWd">
@@ -3615,7 +3814,7 @@ function renderWithdrawal(){
             <div class="field-note">Point your barcode/QR scanner gun at each unit's label — the count fills in automatically as you scan.</div>
           </div>
         </div>
-        <div class="field"><label>Cost per Unit (₱)</label><input id="f_wd_cost" type="number" min="0" step="0.01" placeholder="Auto from SKU"></div>
+        <div class="field"><label>Cost per Unit (₱)</label><input id="f_wd_cost" type="number" min="0" step="0.01" placeholder="Auto from batch"><div class="field-note">Auto-picked from the batch being withdrawn (FIFO) — edit to override</div></div>
         <div class="field">
           <label>Batch Number <span style="font-weight:400;text-transform:none;letter-spacing:0;">(auto-picked · oldest available)</span></label>
           <input id="f_wd_batch" readonly placeholder="No stock available">
@@ -3656,7 +3855,7 @@ MYC,WO-4519,NGP 8890,Maria Santos,ENG-045,10,,"></textarea>
 
     <div class="table-wrap">
       <table>
-        <thead><tr><th style="width:34px;"><input type="checkbox" id="wdSelectAll" title="Select all"></th><th>Site</th><th>Date</th><th>WO #</th><th>Plate #</th><th>Requestor</th><th>SKU</th><th>Batch #</th><th>Qty</th><th>Cost/Unit</th><th>Total</th><th>Released By</th><th></th></tr></thead>
+        <thead><tr><th style="width:34px;"><input type="checkbox" id="wdSelectAll" title="Select all"></th><th>Site</th><th>Date</th><th>WO #</th><th>Plate #</th><th>Requestor</th><th>SKU</th><th>Part Name</th><th>Category</th><th>Batch #</th><th>Qty</th><th>Cost/Unit</th><th>Total</th><th>Released By</th><th></th></tr></thead>
         <tbody id="wdTbody"></tbody>
       </table>
     </div>
@@ -3695,7 +3894,7 @@ MYC,WO-4519,NGP 8890,Maria Santos,ENG-045,10,,"></textarea>
   document.getElementById("f_wd_site").addEventListener("change", refreshWdBatchPick);
   document.getElementById("f_wd_sku").addEventListener("change", (e)=>{
     const s = skuObj(e.target.value);
-    if(s && !document.getElementById("f_wd_cost").dataset.touched) document.getElementById("f_wd_cost").value = s.cost;
+    document.getElementById("f_wd_partname").value = s ? s.name : "";
     refreshWdBatchPick();
   });
   document.getElementById("f_wd_cost").addEventListener("input", (e)=>{ e.target.dataset.touched="1"; });
@@ -3750,9 +3949,10 @@ function openWdForm(id){
   document.getElementById("f_wd_plate").value = w.plate;
   document.getElementById("f_wd_requestor").innerHTML = rosterOptionList("Requestor", w.requestor);
   document.getElementById("f_wd_sku").innerHTML = skuOptionList(w.sku);
+  document.getElementById("f_wd_partname").value = skuName(w.sku);
   document.getElementById("f_wd_qty").value = w.qty;
   const costEl = document.getElementById("f_wd_cost");
-  costEl.value = w.cost; costEl.dataset.touched="";
+  costEl.value = w.cost; costEl.dataset.touched = id ? "1" : "";
   document.getElementById("f_wd_released").value = currentUser ? currentUser.name : "";
   setQtyMode("qr", WD_QTY_CFG);
   refreshWdBatchPick(); // Batch Number is auto-picked (oldest available, FIFO) — see refreshWdBatchPick
@@ -3828,7 +4028,7 @@ function pickOldestBatchWithSim(skuId, siteId, simConsumed){
   for(const b of list){
     const key = siteId+"|"+skuId+"|"+b.batch;
     const remaining = b.remaining - (simConsumed[key]||0);
-    if(remaining>0) return {batch:b.batch, remaining};
+    if(remaining>0) return {batch:b.batch, remaining, cost:b.cost};
   }
   return null;
 }
@@ -3845,7 +4045,7 @@ function pickSpecificBatchWithSim(skuId, siteId, batch, simConsumed){
   const key = siteId+"|"+skuId+"|"+match.batch;
   const remaining = match.remaining - (simConsumed[key]||0);
   if(remaining<=0) return null;
-  return {batch:match.batch, remaining};
+  return {batch:match.batch, remaining, cost:match.cost};
 }
 function parseBulkWithdrawal(raw){
   let text = raw.replace(/^\uFEFF/, "");
@@ -3918,7 +4118,7 @@ function parseBulkWithdrawal(raw){
       site, wo, plate:(plateRaw||"").trim(),
       requestor:(requestorRaw||"").trim(),
       sku: sku.id, qty,
-      cost: parseFloat(costRaw)||sku.cost||0,
+      cost: parseFloat(costRaw)||picked.cost||sku.cost||0,
       batch: picked.batch,
     });
   });
@@ -3988,7 +4188,7 @@ function renderWdTable(){
   }
   if(rows.length===0){
     const filtered = wdSearch.trim() || wdDateFilter!=="all";
-    tbody.innerHTML = `<tr><td colspan="14"><div class="empty-state">${icon("out")}<p>${filtered ? "No withdrawal records match your search/filter." : `No withdrawal records ${isOverall()?"yet":"for this site yet"}.`}</p></div></td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="16"><div class="empty-state">${icon("out")}<p>${filtered ? "No withdrawal records match your search/filter." : `No withdrawal records ${isOverall()?"yet":"for this site yet"}.`}</p></div></td></tr>`;
     return;
   }
   tbody.innerHTML = [...rows].sort((a,b)=>b.date.localeCompare(a.date)).map(w=>`
@@ -4000,6 +4200,8 @@ function renderWdTable(){
       <td class="mono">${esc(w.plate)}</td>
       <td>${esc(w.requestor)}</td>
       <td class="mono">${esc(w.sku)}</td>
+      <td>${esc(skuName(w.sku))}</td>
+      <td><span class="pill">${esc(skuCategory(w.sku))}</span></td>
       <td class="mono">${esc(w.batch)||"—"}</td>
       <td class="mono">${fmtInt(w.qty)}</td>
       <td class="mono">${fmtMoney(w.cost)}</td>
@@ -7356,10 +7558,10 @@ function renderExport(){
 function exportModule(key){
   const scopeTag = isOverall() ? "overall" : (siteObj(currentSite)?.code || currentSite);
   if(key==="skus"){
-    downloadCSV("sku_catalog.csv", ["SKU#","Name","Category","UoM","CostPerPc","LatestBatch#","CatalogCost","TruckUser","ReorderQty","OnHand","Status"],
+    downloadCSV("sku_catalog.csv", ["SKU#","Name","Category","UoM","CostPerPc","LatestBatch#","CatalogCost","TruckUser","ReorderQty","OnHand","Status","CreatedBy","CreatedAt","LastEditedBy","LastEditedAt"],
       db.skus.map(s=>{
         const latest = latestReceivingRecord(s.id);
-        return [s.id,s.name,s.category,s.uom,displaySkuCost(s.id),latest?latest.batch:"",s.cost,s.truckUser||"",s.reorder,stockStatus(s.id).qty,stockStatus(s.id).label];
+        return [s.id,s.name,s.category,s.uom,displaySkuCost(s.id),latest?latest.batch:"",s.cost,s.truckUser||"",s.reorder,stockStatus(s.id).qty,stockStatus(s.id).label,s.createdBy||"",s.createdAt||"",s.lastEditedBy||"",s.lastEdited||""];
       }));
   } else if(key==="receiving"){
     downloadCSV(`receiving_log_${scopeTag}.csv`, ["Site","Date","LoggedAt","Supplier","PONumber","SKU","SKUName","Qty","CostPerUnit","DeliveryDate","BatchNumber","Receiver"],
