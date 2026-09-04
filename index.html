@@ -5531,6 +5531,12 @@ function computeSessionStats(session){
 function itemWasCounted(it){ return it.countedQty!==null && it.countedQty!==undefined && it.countedQty!==""; }
 function itemVariance(it){ return itemWasCounted(it) ? (parseInt(it.countedQty)||0) - Number(it.systemQty) : null; }
 function isItemDiscrepant(it){ return !itemWasCounted(it) || itemVariance(it)!==0; }
+/* A tag (a declared reason like "Unexplained/Missing") only makes sense
+   for a SKU that was actually counted and came out mismatched — none of
+   the tag options describe "nobody checked this one." Uncounted items
+   stay eligible for a 2nd blind count (see isItemDiscrepant above) but
+   never require or get a variance-reason tag. */
+function needsAdminTag(it){ return itemWasCounted(it) && itemVariance(it)!==0; }
 /* Live (not-yet-final) variance stats for a session still awaiting Admin
    review — computed straight off the current countedQty vs. the frozen
    systemQty, since it.remark isn't assigned until Approve is clicked. */
@@ -5656,11 +5662,15 @@ function updateCcBulkBar(){
    posted Stock Adjustment records (see db.adjustments / the Adjustment
    module). Only lines where countedQty differs from the frozen
    systemQty produce a record — "Matched" lines have variance 0 and are
-   skipped. These records are what onHand() reads back to correct
-   future stock calculations. */
+   skipped. A line nobody actually counted is skipped too, on purpose:
+   it is missing information, not a confirmed count of zero, so it must
+   never post a "Missing/Shortage" adjustment against real on-hand
+   stock. These records are what onHand() reads back to correct future
+   stock calculations. */
 function generateAdjustmentsFromSession(session){
   const records = [];
   session.items.forEach(it=>{
+    if(!itemWasCounted(it)) return;
     const counted = parseInt(it.countedQty)||0;
     const variance = counted - Number(it.systemQty);
     if(variance !== 0){
@@ -5930,7 +5940,7 @@ function renderCycleCountSummary(session){
   const stats = computeLiveSessionStats(session);
   const discrepantItems = session.items.filter(isItemDiscrepant);
   const canTriggerSecondCount = discrepantItems.length>0 && !session.secondCountDone;
-  const untaggedCount = discrepantItems.filter(it=>!it.adminTag).length;
+  const untaggedCount = session.items.filter(it=>needsAdminTag(it) && !it.adminTag).length;
   el.innerHTML = `
     <div class="card card-pad" style="margin-bottom:14px;">
       <div class="section-head" style="margin-bottom:6px;">
@@ -5952,7 +5962,7 @@ function renderCycleCountSummary(session){
           const idx = session.items.indexOf(it);
           const counted = itemWasCounted(it);
           const variance = itemVariance(it);
-          const discrepant = isItemDiscrepant(it);
+          const tagRequired = needsAdminTag(it);
           const wasRecounted = it.firstCountQty!==undefined && (session.secondCountSkus||[]).includes(it.sku);
           return `<tr>
             <td class="mono">${esc(it.sku)}</td>
@@ -5963,12 +5973,12 @@ function renderCycleCountSummary(session){
             <td class="mono">${counted ? fmtInt(it.countedQty) : `<span style="color:var(--text-faint);">Not Counted</span>`}</td>
             <td class="mono" style="color:${!counted?'var(--critical)':variance===0?'var(--good)':'var(--none)'};font-weight:700;">${!counted ? "—" : (variance>0?'+':'')+fmtInt(variance)}</td>
             <td>${!counted ? `<span class="badge badge-critical">Not Counted</span>` : variance===0 ? `<span class="badge badge-good">Matched</span>` : `<span class="badge badge-none">Discrepancy</span>`}</td>
-            <td>${discrepant ? `
+            <td>${tagRequired ? `
               <select class="cc-tag-select" data-idx="${idx}" style="width:100%;background:var(--surface2);border:1px solid ${it.adminTag?'var(--border)':'var(--none)'};color:var(--text);padding:6px 8px;border-radius:6px;font-size:12px;">
                 <option value="">Select tag…</option>
                 ${optionList(CC_TAG_OPTIONS, it.adminTag)}
               </select>
-            ` : `<span style="color:var(--text-faint);">—</span>`}</td>
+            ` : !counted ? `<span style="color:var(--text-faint);" title="Not counted — on-hand stays unchanged, no adjustment posted">Not counted, no adjustment</span>` : `<span style="color:var(--text-faint);">—</span>`}</td>
           </tr>`;
         }).join("")}</tbody>
       </table>
@@ -6033,34 +6043,44 @@ function triggerSecondBlindCount(session){
 /* Finalizes a cycle count: only now are per-item remarks assigned and
    any resulting stock adjustments actually posted — nothing is declared
    or adjusted before an Admin explicitly approves it here. Every
-   discrepant SKU must already carry an Admin-selected tag (see the Tag
-   column on the Summary screen) — Approve is blocked until each one has
-   a declared reason, so "why" is always on record, not just "what". */
+   discrepant SKU that was actually counted must already carry an
+   Admin-selected tag (see the Tag column on the Summary screen) —
+   Approve is blocked until each one has a declared reason, so "why" is
+   always on record, not just "what". A SKU that was never counted is
+   NOT a declared discrepancy — it's missing information — so it is
+   never tagged, never defaulted to a quantity, and never adjusted; its
+   on-hand simply carries forward unchanged until someone actually
+   counts it (this cycle or a future one). */
 function approveCycleCount(session){
   if(!isAdmin()){ toast("Only an Admin account can approve a cycle count"); return; }
-  const untagged = session.items.filter(it => isItemDiscrepant(it) && !it.adminTag);
+  const untagged = session.items.filter(it => needsAdminTag(it) && !it.adminTag);
   if(untagged.length){
     toast(`${untagged.length} discrepant SKU(s) still need a tag before you can approve — select a reason for each in the Tag column.`);
     return;
   }
   const stillUncounted = session.items.filter(it=>!itemWasCounted(it));
   const body = stillUncounted.length
-    ? `${stillUncounted.length} SKU(s) are still not counted and will be treated as 0 on hand for adjustment purposes. This finalizes the results and posts any stock adjustments needed. This cannot be undone.`
+    ? `${stillUncounted.length} SKU(s) are still not counted. Their on-hand will be left exactly as-is — no adjustment is posted for them, since "not counted" is not proof they're actually missing. This finalizes the results and posts adjustments only for the SKUs that were counted and had a discrepancy. This cannot be undone.`
     : "This finalizes the results and posts any stock adjustments needed for discrepancies. This cannot be undone.";
   askConfirm("Approve this cycle count?", body, ()=>{
     session.items.forEach(it=>{
       const wasRecounted = it.firstCountQty!==undefined && (session.secondCountSkus||[]).includes(it.sku);
-      const counted = itemWasCounted(it) ? (parseInt(it.countedQty)||0) : 0;
+      const recountNote = wasRecounted
+        ? `2nd blind count confirmed ${itemWasCounted(it) ? it.countedQty : "still not counted"} (initial count was ${it.firstCountQty===null ? "not counted" : it.firstCountQty}). `
+        : "";
+      if(!itemWasCounted(it)){
+        // Never touch countedQty/on-hand for a SKU nobody actually counted.
+        it.remark = it.adminTag || "Not Counted";
+        it.notes = (recountNote + "Not counted — on-hand left unchanged, no adjustment posted.").trim();
+        return;
+      }
+      const counted = parseInt(it.countedQty)||0;
       const variance = counted - Number(it.systemQty);
       const discrepant = variance!==0;
       // A discrepant SKU's final remark is the Admin's declared tag
       // (the actual business reason), not a generic bucket label.
       it.remark = discrepant ? it.adminTag : "Matched";
-      const recountNote = wasRecounted
-        ? `2nd blind count confirmed ${counted} (initial count was ${it.firstCountQty===null ? "not counted" : it.firstCountQty}). `
-        : "";
-      const uncountedNote = (!itemWasCounted(it)) ? "Not counted — defaulted to 0 on Admin approval. " : "";
-      it.notes = (recountNote + uncountedNote).trim();
+      it.notes = recountNote.trim();
       it.countedQty = counted;
     });
     session.status = "completed";
@@ -6190,14 +6210,15 @@ function renderSessionDetail(id){
       <table>
         <thead><tr><th>SKU</th><th>Name</th><th>Truck User</th>${isAdmin() ? `<th>System Qty</th>` : ""}<th>Counted Qty</th><th>Variance</th></tr></thead>
         <tbody>${pageItems.length ? pageItems.map(it=>{
-          const variance = (parseInt(it.countedQty)||0) - it.systemQty;
+          const counted = itemWasCounted(it);
+          const variance = counted ? (parseInt(it.countedQty)||0) - it.systemQty : null;
           return `<tr>
             <td class="mono">${esc(it.sku)}</td>
             <td>${esc(skuName(it.sku))}</td>
             <td>${esc(skuObj(it.sku)?.truckUser||"—")}</td>
             ${isAdmin() ? `<td class="mono">${fmtInt(it.systemQty)}</td>` : ""}
-            <td class="mono">${fmtInt(it.countedQty)}</td>
-            <td class="mono" style="color:${variance===0?'var(--good)':'var(--none)'};font-weight:700;">${variance>0?'+':''}${fmtInt(variance)}</td>
+            <td class="mono">${counted ? fmtInt(it.countedQty) : `<span style="color:var(--text-faint);">Not Counted</span>`}</td>
+            <td class="mono" style="color:${!counted?'var(--text-faint)':variance===0?'var(--good)':'var(--none)'};font-weight:700;">${!counted ? "—" : (variance>0?'+':'')+fmtInt(variance)}</td>
           </tr>`;
         }).join("") : `<tr><td colspan="${isAdmin()?6:5}" style="color:var(--text-faint)">No SKUs match this Truck User filter.</td></tr>`}</tbody>
       </table>
@@ -6422,7 +6443,10 @@ function getSkuHistory(skuId){
   scopedWithdrawals().filter(w=>w.sku===skuId).forEach(w=>events.push({date:w.date, type:"Withdrawal", qty:-w.qty, ref:w.wo, by:w.releasedBy||"—", notes:`Plate ${w.plate} · ${w.requestor}`, site:w.site}));
   scopedReturns().filter(r=>r.sku===skuId).forEach(r=>events.push({date:r.date, type:r.type==="Unused Return"?"Return (In)":"Return (Out)", qty:r.type==="Unused Return"?r.qty:-r.qty, ref:r.ref||"—", by:r.returnedBy||"—", notes:r.reason + (r.notes?" — "+r.notes:""), site:r.site}));
   scopedCcSessions().forEach(s=>{
-    s.items.filter(i=>i.sku===skuId && s.status==="completed").forEach(i=>{
+    // Skip items that were never actually counted — no adjustment was
+    // posted for them (see approveCycleCount), so listing a qty change
+    // here would fabricate a stock movement that never happened.
+    s.items.filter(i=>i.sku===skuId && s.status==="completed" && itemWasCounted(i)).forEach(i=>{
       events.push({date:s.date, type:"Cycle Count", qty:(parseInt(i.countedQty)||0)-i.systemQty, ref:`${siteObj(s.site)?.code || siteName(s.site)} · ${s.date}`, by:s.countedBy||"—", notes:i.remark, site:s.site});
     });
   });
@@ -7621,7 +7645,8 @@ function exportModule(key){
     const rows = [];
     scopedCcSessions().filter(s=>s.status==="completed").forEach(s=>{
       s.items.forEach(it=>{
-        rows.push([siteName(s.site),s.id,s.date,it.sku,it.systemQty,it.countedQty,(parseInt(it.countedQty)||0)-it.systemQty,it.remark,it.notes,s.countedBy]);
+        const counted = itemWasCounted(it);
+        rows.push([siteName(s.site),s.id,s.date,it.sku,it.systemQty,counted?it.countedQty:"",counted?(parseInt(it.countedQty)||0)-it.systemQty:"",it.remark,it.notes,s.countedBy]);
       });
     });
     downloadCSV(`cycle_counts_${scopeTag}.csv`, ["Site","SessionID","Date","SKU","SystemQty","CountedQty","Variance","Remark","Notes","CountedBy"], rows);
