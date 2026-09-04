@@ -601,7 +601,7 @@ tbody tr:hover{background:var(--surface2);}
    DATA LAYER — in-memory only (no browser storage). Seeded
    with sample records so every module has something to show.
    ============================================================ */
-const CATEGORIES = ["Accelerator Pedal Assembly","Adblue","Adjuster","Air Dryer","Air Filter","Air Filter cover","Air Hose","Alternator Assembly","Alternator Belt","Alternator Bolts","ATF Hose","Auto Bulb Socket","Automatic Transmission Fluid","Back Lamp Switch","Ball Joint","Ball Mirror","Battery","Battery Cable","Battery Solution","Battery Terminal","Belt","Beta Gray","Blind Rivet","Brake Chamber","Brake Chamber Assembly","Brake Chamber Diaphragm","Brake Drum Assembly","Brake Fluid","Brake Light bulb","Brake Light Switch","Brake Shoe","Brake Shoe Return Spring","Brake Slack Adjuster","Brakes","Brush","Bulb Housing Receptacle","Bypass Hose","Cable Tie","Cam Shaft Sensor","Cigarette Charger","Clearance Light","Clutch Booster/Secondary clutch","Clutch Cover","Clutch Disc / Clutch Lining","Clutch Disc/Lining","Clutch Master Cylinder - Repair Kit","Clutch Master/Primary Clutch","Common Rail Return & Supply Pipe","Common Rail Sensor","Contact Cleaner","Coolant","Corner Lamp Assembly","Crank Shaft Sensor","Cross Joint","Crystal Bulb","Cutting Disc","Door Lock Assembly","Draglink","Draglink Assy","Drill Bits","ECU","EGR","Electrical","Engine Oil","Epoxy","Fan Belt","Feed Pump","Filters","Flap Disc","Flaps","Fog Light Assembly","Fog Light Bulb","Foot Valve","Four Circuit Valve","Four Way Valve","Fuel Filter","Fuel Injector","Fuel Line","Fuel Pressure Pump","Fuel Pump Assembly","Fuel Rail Sensor","Fuel Tank Cap","Fuse","Fuse Holder","Fuseable Link","Gasket","Gear Box","Gear Oil","General Overhauling Kit","Glass Window","Grease","Hand Brake Assembly","Hand Brake Bolt","Hazard Switch","Headlight Assembly","Headlight Bulb","Headlight Socket","Horn","Hose","Hose Clamp","Hub Nut","Hub Seal","Hydro Vacuum","Ignition Key Switch","Injector","Kingpin Kit","Leaf Spring Assy","Maxi Switch Brake","Module","Nozzle Tip","Oil Filter","Oil Seal","Oil Sending Unit","Oxygen Sensor","Peanut Bulb","Pilot Bearing","Plate Light","Plate light bulb","Power Steering Motor Assembly","Power Window Mechanism","Power Window Motor","Power Window Switch","Pressure Limiting Valve","Pressure Plate","Pressure Plate / Clutch Cover","Primary Clutch","Propeller","Radiator","Radiator Cap","Radiator Hose","Ratchet Tie Down","Relay","Relay Valve/ Relief Valve","Release Bearing","Reserved Tire Bracket Holder","Retainer Assembly","Reverse Light bulb","Reverse Light Switch","Rim","Rivets","Rugs","Sand Paper","Sealant","Sealant Gun","Secondary Clutch Assembly","Selector Cable","Shock Absorber","Side Lamp Assembly","Side Mirror","Side Mirror Bracket","Signal Light bulb","Silicon Oil/Clutch Oil","Spare Tire Carrier","Spindle Assy","Spindle Nut","Starter Assembly","Starter Relay","Steering Pump","Stud Bolt","Suction Valve","Sunction Valve","Suspension","Tail Light Assembly","Tape","Tensioner Bearing","Thermostat","Tie Rod","Tie Rod End","Tires","Toggle Switch","Tube","Turbo Assembly","Turbo Charger","Turbo Intercooler","U-Bolt","Universal O-Ring","Universal Washer","Vacuum Assembly","Valve Cover","Vital Shellac","Vulcanizing Cement","Vulcanizing Patch","Water Jacket","Water Plug","Waterproof Tape","Waterpump","Waterpump Assembly","WD-40","Welding Rod","Wheel Bearing","Wheel Cup","Wheel Cylinder","Window Glass Holder","Windshield","Wiper Arm","Wiper Blade","Wiper Motor","Wire","Wire Terminal"];
+const CATEGORIES = ["Accelerator Pedal Assembly","Adblue","Adjuster","Air Dryer","Air Filter","Air Filter Cover","Air Hose","Alternator Assembly","Alternator Belt","Alternator Bolts","ATF Hose","Auto Bulb Socket","Automatic Transmission Fluid","Back Lamp Switch","Ball Joint","Ball Mirror","Battery","Battery Cable","Battery Solution","Battery Terminal","Beta Gray","Blind Rivet","Brake Chamber","Brake Chamber Assembly","Brake Chamber Diaphragm","Brake Drum Assembly","Brake Fluid","Brake Light Bulb","Brake Light Switch","Brake Shoe","Brake Shoe Return Spring","Brake Slack Adjuster","Brush","Bulb Housing Receptacle","Bypass Hose","Cable Tie","Cam Shaft Sensor","Cigarette Charger","Clearance Light","Clutch Booster/Secondary Clutch","Clutch Cover","Clutch Disc/Lining","Clutch Master Cylinder - Repair Kit","Clutch Master/Primary Clutch","Common Rail Return & Supply Pipe","Common Rail Sensor","Contact Cleaner","Coolant","Corner Lamp Assembly","Crank Shaft Sensor","Cross Joint","Cutting Disc","Dome Light","Door Lock Assembly","Draglink","Draglink Assy","Drill Bits","ECU","EGR","Engine Oil","Epoxy","Fan Belt","Feed Pump","Flap Disc","Flaps","Fog Light Assembly","Fog Light Bulb","Foot Valve","Four Circuit Valve","Four Way Valve","Fuel Filter","Fuel Injector","Fuel Line","Fuel Pressure Pump","Fuel Pump Assembly","Fuel Rail Sensor","Fuel Tank Cap","Fuse","Fuse Holder","Fuseable Link","Gasket","Gear Box","Gear Oil","General Overhauling Kit","Glass Window","Grease","Hand Brake Assembly","Hand Brake Bolt","Hazard Switch","Headlight Assembly","Headlight Bulb","Headlight Socket","Horn","Hose","Hose Clamp","Hub Nut","Hub Seal","Hydro Vacuum","Hydrovacc","Ignition Key Switch","Injector","Kingpin Kit","Leaf Spring Assy","Maxi Switch Brake","Module","Nozzle Tip","Oil Filter","Oil Seal","Oil Sending Unit","Oxygen Sensor","Park Light Bulb","Peanut Bulb","Pilot Bearing","Plate Light","Plate Light Bulb","Power Steering Motor Assembly","Power Window Mechanism","Power Window Motor","Power Window Switch","Pressure Limiting Valve","Pressure Plate / Clutch Cover","Primary Clutch","Propeller","Radiator","Radiator Cap","Radiator Hose","Ratchet Tie Down","Relay","Relay Valve/Relief Valve","Release Bearing","Reserved Tire Bracket Holder","Retainer Assembly","Reverse Light Bulb","Reverse Light Switch","Rim","Rivets","Rugs","Sand Paper","Sealant","Sealant Gun","Secondary Clutch Assembly","Selector Cable","Shock Absorber","Side Lamp Assembly","Side Mirror","Side Mirror Bracket","Signal Light Bulb","Silicon Oil/Clutch Oil","Spare Tire Carrier","Spindle Assy","Spindle Nut","Stabulizer Bush","Starter Assembly","Starter Relay","Steering Pump","Stud Bolt","Suction Valve","Sunction Valve","Tail Light Assembly","Tape","Tensioner Bearing","Thermostat","Tie Rod","Tie Rod End","Tires","Toggle Switch","Tube","Turbo Charger","Turbo Intercooler","U-Bolt","Universal O-Ring","Universal Washer","Vacuum Assembly","Valve Cover","Vital Shellac","Vulcanizing Cement","Vulcanizing Patch","Water Jacket","Water Plug","Waterproof Tape","Waterpump","Waterpump Assembly","WD-40","Welding Rod","Wheel Bearing","Wheel Cup","Wheel Cylinder","Window Glass Holder","Windshield","Wiper Arm","Wiper Blade","Wiper Motor","Wire","Wire Terminal"];
 const BRANDS = ["All Brands","Isuzu","Hino","Fuso","Volvo","Scania","Mitsubishi"];
 const SIZES = ["All Sizes","6-Wheeler","10-Wheeler","Trailer","Light Truck"];
 const UOMS = ["Piece","Set","Box","Liter","Pair","Roll"];
@@ -6251,6 +6251,7 @@ function renderSessionDetail(id){
    ============================================================ */
 let adjSearch = "";
 let adjRemarkFilter = "All";
+let adjSelected = new Set();
 function renderAdjustment(){
   const el = document.getElementById("content");
   const rows = scopedAdjustments();
@@ -6260,7 +6261,7 @@ function renderAdjustment(){
   const netValue = rows.reduce((a,r)=>{ const s=skuObj(r.sku); return a + r.variance*(s?Number(s.cost):0); },0);
   const sessionCount = new Set(rows.map(r=>r.sessionId)).size;
   el.innerHTML = `
-    <div class="section-head"><h3 style="font-size:16px;">Stock Adjustments</h3><p>Every discrepancy from a completed Cycle Count is posted here automatically and corrects on-hand quantity going forward. This module is read-only — to add a correction, run and complete a Cycle Count.</p></div>
+    <div class="section-head"><h3 style="font-size:16px;">Stock Adjustments</h3><p>Every discrepancy from a completed Cycle Count is posted here automatically and corrects on-hand quantity going forward. Quantities/variance are only ever produced by a Cycle Count — from here you can bulk-edit the Remark/Notes on existing entries or delete entries outright (deleting reverses its effect on on-hand stock).</p></div>
     <div class="kpi-row">
       <div class="kpi accent-bar"><div class="label">Total Adjustments</div><div class="value">${fmtInt(rows.length)}</div><div class="sub">From ${fmtInt(sessionCount)} cycle count session(s)</div></div>
       <div class="kpi good-bar"><div class="label">Units Found (+)</div><div class="value">+${fmtInt(positive.reduce((a,r)=>a+r.variance,0))}</div><div class="sub">${fmtInt(positive.length)} line item(s)</div></div>
@@ -6275,9 +6276,39 @@ function renderAdjustment(){
       <div class="spacer"></div>
       <button class="btn" id="btnExportAdj">${icon("download")} Export CSV</button>
     </div>
+
+    <div class="bulk-bar" id="adjBulkBar">
+      <span><strong id="adjSelectedCount">0</strong> adjustment(s) selected</span>
+      <div class="spacer"></div>
+      <button class="btn" id="btnClearAdjSelection">Clear</button>
+      <button class="btn" id="btnBulkEditAdj">${icon("edit")} Bulk Edit Selected</button>
+      <button class="btn btn-danger" id="btnDeleteSelectedAdj">${icon("trash")} Delete Selected</button>
+    </div>
+
+    <div class="form-panel" id="adjBulkEditFormPanel">
+      <div class="section-head" style="margin-bottom:12px;">
+        <h3 style="font-size:16px;">Bulk Edit Selected Adjustments</h3>
+        <p>Check which field(s) to update, set the new value, then apply to every selected adjustment. Unchecked fields are left as-is. System Qty, Counted Qty, and Variance are not editable here — they reflect what was actually counted.</p>
+      </div>
+      <div class="form-grid cols-2">
+        <div class="field">
+          <label class="checkbox-row"><input type="checkbox" id="adjBulkEditRemarkChk"> Remark</label>
+          <select id="adjBulkEditRemarkValue" disabled>${optionList(CC_REMARKS)}</select>
+        </div>
+        <div class="field">
+          <label class="checkbox-row"><input type="checkbox" id="adjBulkEditNotesChk"> Notes</label>
+          <input id="adjBulkEditNotesValue" placeholder="New notes text" disabled>
+        </div>
+      </div>
+      <div class="form-actions">
+        <button class="btn btn-accent" id="btnApplyBulkEditAdj">Apply to Selected</button>
+        <button class="btn btn-ghost" id="btnCancelBulkEditAdj">Cancel</button>
+      </div>
+    </div>
+
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Date</th><th>Site</th><th>SKU</th><th>Name</th><th>System Qty</th><th>Counted Qty</th><th>Variance</th><th>Remark</th><th>Notes</th><th>Adjusted By</th><th></th></tr></thead>
+        <thead><tr><th style="width:34px;"><input type="checkbox" id="adjSelectAll" title="Select all"></th><th>Date</th><th>Site</th><th>SKU</th><th>Name</th><th>System Qty</th><th>Counted Qty</th><th>Variance</th><th>Remark</th><th>Notes</th><th>Adjusted By</th><th></th></tr></thead>
         <tbody id="adjTbody"></tbody>
       </table>
     </div>
@@ -6289,22 +6320,103 @@ function renderAdjustment(){
     downloadCSV(`stock_adjustments_${scopeTag}.csv`, ["Date","Site","SKU","Name","SystemQty","CountedQty","Variance","Remark","Notes","AdjustedBy","SessionID"],
       scopedAdjustments().map(a=>[a.date, siteName(a.site), a.sku, skuName(a.sku), a.systemQty, a.countedQty, a.variance, a.remark, a.notes, a.adjustedBy, a.sessionId]));
   });
+  document.getElementById("adjSelectAll").addEventListener("change", (e)=>{
+    filteredAdjustments().forEach(a => e.target.checked ? adjSelected.add(a.id) : adjSelected.delete(a.id));
+    renderAdjustmentTable();
+  });
+  document.getElementById("btnClearAdjSelection").addEventListener("click", ()=>{
+    adjSelected.clear();
+    renderAdjustmentTable();
+  });
+  document.getElementById("btnBulkEditAdj").addEventListener("click", ()=>{
+    if(adjSelected.size===0){ toast("Select at least one adjustment first"); return; }
+    document.getElementById("adjBulkEditFormPanel").classList.add("open");
+    document.getElementById("adjBulkEditFormPanel").scrollIntoView({behavior:"smooth", block:"nearest"});
+  });
+  document.getElementById("btnCancelBulkEditAdj").addEventListener("click", ()=>{
+    document.getElementById("adjBulkEditFormPanel").classList.remove("open");
+  });
+  [["adjBulkEditRemarkChk","adjBulkEditRemarkValue"],["adjBulkEditNotesChk","adjBulkEditNotesValue"]].forEach(([chkId,valId])=>{
+    document.getElementById(chkId).addEventListener("change",(e)=>{
+      document.getElementById(valId).disabled = !e.target.checked;
+    });
+  });
+  document.getElementById("btnApplyBulkEditAdj").addEventListener("click", applyBulkEditAdj);
+  document.getElementById("btnDeleteSelectedAdj").addEventListener("click", ()=>{
+    const count = adjSelected.size;
+    if(count===0) return;
+    askConfirm(`Delete ${count} adjustment(s)?`, "This reverses their effect on on-hand stock calculations. Historical cycle count records are unaffected.", ()=>{
+      const ids = Array.from(adjSelected);
+      db.adjustments = db.adjustments.filter(a=>!adjSelected.has(a.id));
+      ids.forEach(id=>deleteRecordItem("adjustments", id));
+      adjSelected.clear();
+      renderAdjustmentTable();
+      toast(`${count} adjustment(s) deleted`);
+    });
+  });
   renderAdjustmentTable();
 }
-function renderAdjustmentTable(){
-  const tbody = document.getElementById("adjTbody");
+function filteredAdjustments(){
   const q = adjSearch.trim().toLowerCase();
-  const rows = scopedAdjustments().filter(a=>{
+  return scopedAdjustments().filter(a=>{
     if(q && !(String(a.sku).toLowerCase().includes(q) || skuName(a.sku).toLowerCase().includes(q))) return false;
     if(adjRemarkFilter!=="All" && a.remark!==adjRemarkFilter) return false;
     return true;
   }).sort((a,b)=> b.date.localeCompare(a.date) || b.id-a.id);
+}
+function applyBulkEditAdj(){
+  if(adjSelected.size===0){ toast("No adjustments selected"); return; }
+  const changes = {};
+  if(document.getElementById("adjBulkEditRemarkChk").checked) changes.remark = document.getElementById("adjBulkEditRemarkValue").value;
+  if(document.getElementById("adjBulkEditNotesChk").checked) changes.notes = document.getElementById("adjBulkEditNotesValue").value.trim();
+
+  if(Object.keys(changes).length===0){ toast("Check at least one field to update"); return; }
+
+  const count = adjSelected.size;
+  const fieldLabels = {remark:"Remark", notes:"Notes"};
+  const reviewFields = [
+    {label:"Adjustments to update", value:count},
+    ...Object.entries(changes).map(([k,v])=>({label:fieldLabels[k], value: v||"—"})),
+  ];
+  openReviewConfirm("Confirm Bulk Edit — Is this accurate?", reviewFields, ()=>{
+    const updated = [];
+    db.adjustments.forEach(a=>{
+      if(adjSelected.has(a.id)){ Object.assign(a, changes); updated.push(a); }
+    });
+    updated.forEach(a=>saveRecordItem("adjustments", a));
+    document.getElementById("adjBulkEditFormPanel").classList.remove("open");
+    renderAdjustmentTable();
+    toast(`${count} adjustment(s) updated`);
+  });
+}
+function updateAdjBulkBar(){
+  const bar = document.getElementById("adjBulkBar");
+  if(!bar) return;
+  const count = adjSelected.size;
+  bar.classList.toggle("open", count>0);
+  const countEl = document.getElementById("adjSelectedCount");
+  if(countEl) countEl.textContent = count;
+  const selectAll = document.getElementById("adjSelectAll");
+  if(selectAll){
+    const rows = filteredAdjustments();
+    const allSelected = rows.length>0 && rows.every(a=>adjSelected.has(a.id));
+    const someSelected = rows.some(a=>adjSelected.has(a.id));
+    selectAll.checked = allSelected;
+    selectAll.indeterminate = someSelected && !allSelected;
+  }
+}
+function renderAdjustmentTable(){
+  const tbody = document.getElementById("adjTbody");
+  const rows = filteredAdjustments();
+  adjSelected.forEach(id => { if(!db.adjustments.some(a=>a.id===id)) adjSelected.delete(id); });
   if(rows.length===0){
-    tbody.innerHTML = `<tr><td colspan="11"><div class="empty-state">${icon("adjust")}<p>No stock adjustments yet.</p><p>They'll appear here once a Cycle Count is completed with a discrepancy.</p></div></td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="12"><div class="empty-state">${icon("adjust")}<p>No stock adjustments yet.</p><p>They'll appear here once a Cycle Count is completed with a discrepancy.</p></div></td></tr>`;
+    updateAdjBulkBar();
     return;
   }
   tbody.innerHTML = rows.map(a=>`
     <tr>
+      <td><input type="checkbox" class="adj-row-check" data-id="${a.id}" ${adjSelected.has(a.id)?"checked":""}></td>
       <td class="mono">${a.date}</td>
       <td><span class="pill">${esc(siteName(a.site))}</span></td>
       <td class="mono">${esc(a.sku)}</td>
@@ -6322,6 +6434,12 @@ function renderAdjustmentTable(){
     ccViewSessionId = parseInt(b.dataset.viewsession);
     goTo("cyclecount");
   }));
+  tbody.querySelectorAll(".adj-row-check").forEach(cb=>cb.addEventListener("change", (e)=>{
+    const id = parseInt(e.target.dataset.id);
+    if(e.target.checked) adjSelected.add(id); else adjSelected.delete(id);
+    updateAdjBulkBar();
+  }));
+  updateAdjBulkBar();
 }
 
 /* ============================================================
