@@ -796,13 +796,21 @@ const firebaseConfig = {
   measurementId: "G-DY1FPHZT5L",
 };
 const CLOUD_MODULES = ["sites","skus","receiving","withdrawals","returns","requests","transfers","ccSessions","adjustments","roster","trucks","suppliers","users","transmittalSeq"];
-/* "receiving" outgrew the single-document approach: every entry lived
-   inside ONE Firestore document for the whole module, which hits
-   Firestore's hard 1MB-per-document ceiling as entries pile up. It's
-   moved to one small document per record (a subcollection) instead, so
-   a write only has to fit *that one entry* under 1MB, not the entire
-   history. */
-const PER_RECORD_MODULES = ["receiving"];
+/* These modules outgrew the single-document approach in two ways:
+   1. Every entry lived inside ONE Firestore document for the whole
+      module, which hits Firestore's hard 1MB-per-document ceiling as
+      entries pile up.
+   2. Worse, a whole-array .set() is a last-write-wins overwrite: if two
+      people at two sites (or two tabs) each add a record around the
+      same time, whichever save reaches Firestore second silently
+      replaces the other's array — dropping their new record entirely
+      even though it looked saved on their screen. This was the root
+      cause of On Hand / Withdrawn figures periodically not reflecting
+      real activity.
+   Moved to one small document per record (a subcollection) instead, so
+   a write only touches *that one entry* — no size ceiling, and two
+   concurrent writes to different records can never clobber each other. */
+const PER_RECORD_MODULES = ["receiving","withdrawals","adjustments","returns","transfers"];
 const SINGLE_DOC_MODULES = CLOUD_MODULES.filter(n=>!PER_RECORD_MODULES.includes(n));
 let cloudEnabled = false;
 let cloudDB = null;
@@ -1477,7 +1485,17 @@ document.getElementById("notifMarkAllBtn").addEventListener("click", (e)=>{
 document.getElementById("notifPanel").addEventListener("click", (e)=> e.stopPropagation());
 document.addEventListener("click", ()=>{ if(notifPanelOpenFlag) closeNotifPanel(); });
 
-function onHand(skuId){
+/* Full breakdown behind the On Hand figure, scoped the same way onHand()
+   is (current site, or all sites when "overall"). Received and Withdrawn
+   here are the literal Total Received / Total Withdrawn for the SKU —
+   the Stock Summary table shows these alongside Transfer and Adj/Return
+   so On Hand always visibly reconciles as:
+     On Hand = Received - Withdrawn + Transfer + AdjReturn
+   Previously the Stock Summary table only displayed Received and
+   Withdrawn next to On Hand, so whenever a SKU also had transfers,
+   cycle-count adjustments, or returns, On Hand would not equal
+   Received - Withdrawn and looked like a data error. */
+function onHandBreakdown(skuId){
   const rec = scopedReceiving().filter(r=>r.sku===skuId).reduce((a,r)=>a+Number(r.qty),0);
   const wd  = scopedWithdrawals().filter(w=>w.sku===skuId).reduce((a,w)=>a+Number(w.qty),0);
   const adj = scopedAdjustments().filter(a=>a.sku===skuId).reduce((a,x)=>a+Number(x.variance),0);
@@ -1485,7 +1503,12 @@ function onHand(skuId){
   const tOut = scopedTransfersOut().filter(t=>t.sku===skuId).reduce((a,t)=>a+Number(t.qty),0);
   const retIn = scopedReturns().filter(r=>r.sku===skuId && r.type==="Unused Return").reduce((a,r)=>a+Number(r.qty),0);
   const retOut = scopedReturns().filter(r=>r.sku===skuId && r.type==="Wrong Delivery").reduce((a,r)=>a+Number(r.qty),0);
-  return rec - wd + adj + tIn - tOut + retIn - retOut;
+  const transfer = tIn - tOut;
+  const adjReturn = adj + retIn - retOut;
+  return { rec, wd, transfer, adjReturn, qty: rec - wd + transfer + adjReturn };
+}
+function onHand(skuId){
+  return onHandBreakdown(skuId).qty;
 }
 /* Most recent Receiving entry for a SKU (scoped to the current site
    selector, same as onHand()) — ordered by logged-at timestamp first
@@ -1667,7 +1690,7 @@ function commitTransferReceipt(id, receivedQty, receivedRemarks){
     t.receivedQty = null;
     t.receivedRemarks = "";
   }
-  saveModule("transfers");
+  saveRecordItem("transfers", t);
   if(typeof renderTfTable==="function") renderTfTable();
   renderNotifBell();
   toast(hasTransferDiscrepancy(t)
@@ -3926,9 +3949,10 @@ MYC,WO-4519,NGP 8890,Maria Santos,ENG-045,10,,"></textarea>
     const count = wdSelected.size;
     if(count===0) return;
     askConfirm(`Delete ${count} withdrawal(s)?`, "This will restore the quantities back into on-hand stock.", ()=>{
+      const ids = [...wdSelected];
       db.withdrawals = db.withdrawals.filter(w=>!wdSelected.has(w.id));
       wdSelected.clear();
-      saveModule("withdrawals");
+      ids.forEach(id=>deleteRecordItem("withdrawals", id));
       renderWdTable();
       toast(`${count} withdrawal(s) deleted`);
     });
@@ -4008,7 +4032,7 @@ function commitWd(rec, isEdit, willExhaustBatch){
     rec.id = newId();
     db.withdrawals.push(rec);
   }
-  saveModule("withdrawals");
+  saveRecordItem("withdrawals", rec);
   closeWdForm();
   renderWdTable();
   if(willExhaustBatch){
@@ -4153,12 +4177,14 @@ function reviewBulkWd(){
 function commitBulkWd(rows){
   const releasedBy = currentUser ? currentUser.name : "";
   rows.forEach(r=>{
-    db.withdrawals.push({
+    const rec = {
       id: newId(), site: r.site, date: todayStr(),
       wo: r.wo, plate: r.plate, requestor: r.requestor,
       sku: r.sku, qty: r.qty, cost: r.cost, batch: r.batch,
       releasedBy,
-    });
+    };
+    db.withdrawals.push(rec);
+    saveRecordItem("withdrawals", rec);
   });
   document.getElementById("wdBulkText").value = "";
   const fileInput = document.getElementById("wdBulkFile");
@@ -4166,7 +4192,6 @@ function commitBulkWd(rows){
   document.getElementById("wdBulkParseError").textContent = "";
   document.getElementById("wdBulkFormPanel").classList.remove("open");
   pendingBulkWdRows = [];
-  saveModule("withdrawals");
   renderWdTable();
   toast(`${rows.length} withdrawal${rows.length===1?"":"s"} added`);
 }
@@ -4220,9 +4245,10 @@ function renderWdTable(){
   tbody.querySelectorAll("[data-edit]").forEach(b=>b.addEventListener("click", ()=>openWdForm(parseInt(b.dataset.edit))));
   tbody.querySelectorAll("[data-del]").forEach(b=>b.addEventListener("click", ()=>{
     askConfirm("Delete withdrawal?","This will restore the quantity back into on-hand stock.", ()=>{
-      db.withdrawals = db.withdrawals.filter(w=>w.id!==parseInt(b.dataset.del));
-      wdSelected.delete(parseInt(b.dataset.del));
-      saveModule("withdrawals");
+      const delId = parseInt(b.dataset.del);
+      db.withdrawals = db.withdrawals.filter(w=>w.id!==delId);
+      wdSelected.delete(delId);
+      deleteRecordItem("withdrawals", delId);
       renderWdTable(); toast("Entry deleted");
     });
   }));
@@ -4611,7 +4637,7 @@ function commitRet(rec, isEdit){
     rec.id = newId();
     db.returns.push(rec);
   }
-  saveModule("returns");
+  saveRecordItem("returns", rec);
   closeRetForm();
   renderRetTable();
   toast("Return saved");
@@ -4645,7 +4671,7 @@ function renderRetTable(){
     askConfirm("Delete return entry?","This will reverse its effect on on-hand stock.", ()=>{
       const delId = parseInt(b.dataset.del);
       db.returns = db.returns.filter(r=>r.id!==delId);
-      saveModule("returns");
+      deleteRecordItem("returns", delId);
       renderRetTable(); toast("Entry deleted");
     });
   }));
@@ -5202,7 +5228,7 @@ function commitTf(rec, isEdit){
     rec.id = newId();
     db.transfers.push(rec);
   }
-  saveModule("transfers");
+  saveRecordItem("transfers", rec);
   closeTfForm();
   renderTfTable();
   renderNotifBell();
@@ -5272,9 +5298,10 @@ function renderTfTable(){
       ? "This will reverse the movement — quantity returns to the From Site and is removed from the To Site."
       : "This transfer hasn't been received yet — deleting it returns the quantity to the From Site.";
     askConfirm("Delete transfer?", msg, ()=>{
-      db.transfers = db.transfers.filter(x=>x.id!==parseInt(b.dataset.del));
-      tfSelected.delete(parseInt(b.dataset.del));
-      saveModule("transfers");
+      const delId = parseInt(b.dataset.del);
+      db.transfers = db.transfers.filter(x=>x.id!==delId);
+      tfSelected.delete(delId);
+      deleteRecordItem("transfers", delId);
       renderTfTable(); renderNotifBell(); toast("Entry deleted");
     });
   }));
@@ -5423,22 +5450,21 @@ function renderSummary(){
     </div>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>SKU #</th><th>Name</th><th>Category</th><th>Received</th><th>Withdrawn</th><th>On Hand</th><th>Reorder Qty</th><th>Status</th></tr></thead>
+        <thead><tr><th>SKU #</th><th>Name</th><th>Category</th><th>Received</th><th>Withdrawn</th><th>Transfer</th><th>Adj/Return</th><th>On Hand</th><th>Reorder Qty</th><th>Status</th></tr></thead>
         <tbody id="sumTbody"></tbody>
       </table>
     </div>
-    <p style="color:var(--text-faint);font-size:11.5px;margin-top:12px;">Status rules — <strong style="color:var(--none)">No Stock</strong>: on-hand ≤ 0 with prior receiving/withdrawal activity · <strong style="color:var(--text-faint)">Not Stocked</strong>: on-hand ≤ 0 with no receiving or withdrawal recorded yet · <strong style="color:var(--critical)">Critical</strong>: on-hand above zero but at or below reorder qty · <strong style="color:var(--good)">Good</strong>: on-hand above reorder qty.</p>
+    <p style="color:var(--text-faint);font-size:11.5px;margin-top:12px;">On Hand = Received − Withdrawn + Transfer (net in/out between sites) + Adj/Return (net cycle-count adjustments and returns). Status rules — <strong style="color:var(--none)">No Stock</strong>: on-hand ≤ 0 with prior receiving/withdrawal activity · <strong style="color:var(--text-faint)">Not Stocked</strong>: on-hand ≤ 0 with no receiving or withdrawal recorded yet · <strong style="color:var(--critical)">Critical</strong>: on-hand above zero but at or below reorder qty · <strong style="color:var(--good)">Good</strong>: on-hand above reorder qty.</p>
   `;
   document.getElementById("sumSearchInput").addEventListener("input",(e)=>{summarySearch=e.target.value; renderSummaryTable();});
   document.getElementById("sumFilter").addEventListener("change",(e)=>{summaryFilter=e.target.value; renderSummaryTable();});
   document.getElementById("btnExportSummary").addEventListener("click", ()=>{
     const rows = db.skus.map(s=>{
-      const rec = scopedReceiving().filter(r=>r.sku===s.id).reduce((a,r)=>a+Number(r.qty),0);
-      const wd = scopedWithdrawals().filter(w=>w.sku===s.id).reduce((a,w)=>a+Number(w.qty),0);
+      const b = onHandBreakdown(s.id);
       const st = stockStatus(s.id);
-      return [s.id,s.name,s.category,rec,wd,st.qty,s.reorder,st.label];
+      return [s.id,s.name,s.category,b.rec,b.wd,b.transfer,b.adjReturn,b.qty,s.reorder,st.label];
     });
-    downloadCSV(`stock_summary_${currentSite==="overall"?"overall":siteObj(currentSite)?.code||currentSite}.csv`, ["SKU#","Name","Category","Received","Withdrawn","OnHand","ReorderQty","Status"], rows);
+    downloadCSV(`stock_summary_${currentSite==="overall"?"overall":siteObj(currentSite)?.code||currentSite}.csv`, ["SKU#","Name","Category","Received","Withdrawn","Transfer","AdjReturn","OnHand","ReorderQty","Status"], rows);
   });
   renderSummaryTable();
 }
@@ -5450,17 +5476,18 @@ function renderSummaryTable(){
     if(summaryFilter!=="All" && stockStatus(s.id).label!==summaryFilter) return false;
     return true;
   });
-  if(rows.length===0){ tbody.innerHTML = `<tr><td colspan="8"><div class="empty-state">${icon("layers")}<p>No SKUs match this view.</p></div></td></tr>`; return; }
+  if(rows.length===0){ tbody.innerHTML = `<tr><td colspan="10"><div class="empty-state">${icon("layers")}<p>No SKUs match this view.</p></div></td></tr>`; return; }
   tbody.innerHTML = rows.map(s=>{
-    const rec = scopedReceiving().filter(r=>r.sku===s.id).reduce((a,r)=>a+Number(r.qty),0);
-    const wd = scopedWithdrawals().filter(w=>w.sku===s.id).reduce((a,w)=>a+Number(w.qty),0);
+    const b = onHandBreakdown(s.id);
     const st = stockStatus(s.id);
     return `<tr>
       <td class="mono">${esc(s.id)}</td>
       <td>${esc(s.name)}</td>
       <td><span class="pill">${esc(s.category)}</span></td>
-      <td class="mono">${fmtInt(rec)}</td>
-      <td class="mono">${fmtInt(wd)}</td>
+      <td class="mono">${fmtInt(b.rec)}</td>
+      <td class="mono">${fmtInt(b.wd)}</td>
+      <td class="mono">${b.transfer>0?"+":""}${fmtInt(b.transfer)}</td>
+      <td class="mono">${b.adjReturn>0?"+":""}${fmtInt(b.adjReturn)}</td>
       <td class="mono" style="font-weight:700;">${fmtInt(st.qty)}</td>
       <td class="mono">${fmtInt(s.reorder)}</td>
       <td>${badge(st)}</td>
@@ -6042,7 +6069,7 @@ function approveCycleCount(session){
     const newAdjustments = generateAdjustmentsFromSession(session);
     if(newAdjustments.length){
       db.adjustments.push(...newAdjustments);
-      saveModule("adjustments");
+      newAdjustments.forEach(a=>saveRecordItem("adjustments", a));
     }
     saveModule("ccSessions");
     renderCycleCount();
@@ -7584,12 +7611,11 @@ function exportModule(key){
     downloadCSV(`transfer_log_${scopeTag}.csv`, ["Date","LoggedAt","SKU","QtyDispatched","QtyReceived","CostPerUnit","FromSite","ToSite","Status","ReceivedDate","ReceivedRemarks","TransferredBy","Notes"],
       scopedTransfers().map(t=>[t.date,t.timestamp,t.sku,t.qty,isTransferReceived(t)?transferReceivedQty(t):"",t.cost,siteName(t.fromSite),siteName(t.toSite),transferStatusLabel(t,t.toSite),t.receivedDate||"",t.receivedRemarks||"",t.transferredBy,t.notes]));
   } else if(key==="summary"){
-    downloadCSV(`stock_summary_${scopeTag}.csv`, ["SKU#","Name","Category","Received","Withdrawn","OnHand","ReorderQty","Status"],
+    downloadCSV(`stock_summary_${scopeTag}.csv`, ["SKU#","Name","Category","Received","Withdrawn","Transfer","AdjReturn","OnHand","ReorderQty","Status"],
       db.skus.map(s=>{
-        const rec = scopedReceiving().filter(r=>r.sku===s.id).reduce((a,r)=>a+Number(r.qty),0);
-        const wd = scopedWithdrawals().filter(w=>w.sku===s.id).reduce((a,w)=>a+Number(w.qty),0);
+        const b = onHandBreakdown(s.id);
         const st = stockStatus(s.id);
-        return [s.id,s.name,s.category,rec,wd,st.qty,s.reorder,st.label];
+        return [s.id,s.name,s.category,b.rec,b.wd,b.transfer,b.adjReturn,b.qty,s.reorder,st.label];
       }));
   } else if(key==="cyclecounts"){
     const rows = [];
