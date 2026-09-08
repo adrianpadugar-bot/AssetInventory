@@ -3674,7 +3674,7 @@ function renderRecTable(){
     tbody.innerHTML = `<tr><td colspan="15"><div class="empty-state">${icon("in")}<p>${filtered ? "No receiving records match your search/filter." : `No receiving records ${isOverall()?"yet":"for this site yet"}.`}</p></div></td></tr>`;
     return;
   }
-  tbody.innerHTML = [...rows].sort((a,b)=>b.date.localeCompare(a.date)).map(r=>`
+  tbody.innerHTML = [...rows].sort((a,b)=>b.date.localeCompare(a.date) || b.id-a.id).map(r=>`
     <tr>
       <td><input type="checkbox" class="rec-row-check" data-id="${r.id}" ${recSelected.has(r.id)?"checked":""}></td>
       <td><span class="pill">${esc(siteName(r.site))}</span></td>
@@ -4216,7 +4216,7 @@ function renderWdTable(){
     tbody.innerHTML = `<tr><td colspan="16"><div class="empty-state">${icon("out")}<p>${filtered ? "No withdrawal records match your search/filter." : `No withdrawal records ${isOverall()?"yet":"for this site yet"}.`}</p></div></td></tr>`;
     return;
   }
-  tbody.innerHTML = [...rows].sort((a,b)=>b.date.localeCompare(a.date)).map(w=>`
+  tbody.innerHTML = [...rows].sort((a,b)=>b.date.localeCompare(a.date) || b.id-a.id).map(w=>`
     <tr>
       <td><input type="checkbox" class="wd-row-check" data-id="${w.id}" ${wdSelected.has(w.id)?"checked":""}></td>
       <td><span class="pill">${esc(siteName(w.site))}</span></td>
@@ -4646,7 +4646,7 @@ function renderRetTable(){
   const tbody = document.getElementById("retTbody");
   const rows = scopedReturns();
   if(rows.length===0){ tbody.innerHTML = `<tr><td colspan="13"><div class="empty-state">${icon("returnicon")}<p>No return records ${isOverall()?"yet":"for this site yet"}.</p></div></td></tr>`; return; }
-  tbody.innerHTML = [...rows].sort((a,b)=>b.date.localeCompare(a.date)).map(r=>`
+  tbody.innerHTML = [...rows].sort((a,b)=>b.date.localeCompare(a.date) || b.id-a.id).map(r=>`
     <tr>
       <td><span class="pill">${esc(siteName(r.site))}</span></td>
       <td class="mono">${r.date}</td>
@@ -5253,7 +5253,7 @@ function renderTfTable(){
     selectAll.indeterminate = someSelected && !allSelected;
   }
   if(rows.length===0){ tbody.innerHTML = `<tr><td colspan="13"><div class="empty-state">${icon("transfer")}<p>No transfers ${isOverall()?"":"involving this site "}match${isOverall()?" yet":" this filter yet"}.</p></div></td></tr>`; return; }
-  tbody.innerHTML = [...rows].sort((a,b)=>b.date.localeCompare(a.date)).map(t=>{
+  tbody.innerHTML = [...rows].sort((a,b)=>b.date.localeCompare(a.date) || b.id-a.id).map(t=>{
     // "Perspective" for the status label/action: prefer the To Site's
     // wording ("For Receive") whenever the viewer can see that side —
     // i.e. Overall, or the currently selected site IS the To Site.
