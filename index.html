@@ -5073,7 +5073,7 @@ function renderTransfer(){
           <input id="f_tf_qty" type="number" min="1" placeholder="0">
           <div class="field-note" id="tfAvailNote"></div>
         </div>
-        <div class="field"><label>Cost per Unit (₱)</label><input id="f_tf_cost" type="number" min="0" step="0.01" placeholder="Auto from SKU"></div>
+        <div class="field"><label>Cost per Unit (₱)</label><input id="f_tf_cost" type="number" min="0" step="0.01" placeholder="Auto from batch"><div class="field-note">Auto-picked from the oldest available batch at the From Site (FIFO) — edit to override</div></div>
         <div class="field"><label>Transferred By</label><input id="f_tf_by" readonly><div class="field-note">Auto-filled from your logged-in account</div></div>
         <div class="field"><label>Handover To</label><select id="f_tf_handover">${rosterOptionList("Handover To")}</select></div>
         <div class="field">
@@ -5108,10 +5108,9 @@ function renderTransfer(){
     if(e.key==="Enter"){ e.preventDefault(); applyScannedSkuToSelect("f_tf_scan","f_tf_sku","f_tf_qty"); }
   });
   document.getElementById("f_tf_scan").addEventListener("blur", ()=>applyScannedSkuToSelect("f_tf_scan","f_tf_sku","f_tf_qty"));
-  document.getElementById("f_tf_from").addEventListener("change", refreshTfAvailNote);
-  document.getElementById("f_tf_sku").addEventListener("change", (e)=>{
-    const s = skuObj(e.target.value);
-    if(s && !document.getElementById("f_tf_cost").dataset.touched) document.getElementById("f_tf_cost").value = s.cost;
+  document.getElementById("f_tf_from").addEventListener("change", ()=>{ refreshTfCostPick(); refreshTfAvailNote(); });
+  document.getElementById("f_tf_sku").addEventListener("change", ()=>{
+    refreshTfCostPick();
     refreshTfAvailNote();
   });
   document.getElementById("f_tf_cost").addEventListener("input", (e)=>{ e.target.dataset.touched="1"; });
@@ -5132,6 +5131,29 @@ function renderTransfer(){
     printConsolidatedTransferReceipt([...tfSelected]);
   });
   renderTfTable();
+}
+/* Same FIFO oldest-batch cost capture as Withdrawal's refreshWdBatchPick:
+   auto-fills Cost per Unit from the oldest-created batch (at the currently
+   selected From Site) that still has quantity remaining for this SKU,
+   falling back to the SKU's flat catalog cost if no batch is available.
+   Only touches the field while it hasn't been manually edited (tracked via
+   the "touched" data attribute), same override behavior as Withdrawal.
+   Transfer still doesn't track/consume a specific batch for quantity
+   purposes (see note above renderTransfer) — this only mirrors how the
+   Cost per Unit value itself is captured. */
+function refreshTfCostPick(){
+  const skuEl = document.getElementById("f_tf_sku");
+  const fromEl = document.getElementById("f_tf_from");
+  const costEl = document.getElementById("f_tf_cost");
+  if(!skuEl || !fromEl || !costEl) return;
+  if(costEl.dataset.touched) return;
+  const picked = pickOldestBatch(skuEl.value, fromEl.value, null);
+  if(picked){
+    costEl.value = Math.round(picked.cost*100)/100;
+  } else {
+    const s = skuObj(skuEl.value);
+    costEl.value = s ? s.cost : "";
+  }
 }
 /* Shows live on-hand at the currently selected From Site for the
    currently selected SKU, right under the Quantity field, and flags it
@@ -5162,11 +5184,12 @@ function openTfForm(id){
   document.getElementById("f_tf_sku").innerHTML = skuOptionList(t.sku);
   document.getElementById("f_tf_qty").value = t.qty;
   const costEl = document.getElementById("f_tf_cost");
-  costEl.value = t.cost; costEl.dataset.touched = "";
+  costEl.value = t.cost; costEl.dataset.touched = id ? "1" : "";
   document.getElementById("f_tf_by").value = currentUser ? currentUser.name : "";
   document.getElementById("f_tf_handover").innerHTML = rosterOptionList("Handover To", t.handoverTo);
   document.getElementById("f_tf_status").value = t.status || "in_transit";
   document.getElementById("f_tf_notes").value = t.notes || "";
+  refreshTfCostPick(); // Cost per Unit is auto-picked (oldest available batch, FIFO) — see refreshTfCostPick
   refreshTfAvailNote();
   const scanEl = document.getElementById("f_tf_scan");
   if(scanEl){ scanEl.value = ""; setTimeout(()=>scanEl.focus(), 60); }
