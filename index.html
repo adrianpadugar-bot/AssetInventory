@@ -2063,6 +2063,38 @@ function renderDashboard(){
     .sort((a,b)=> b.count-a.count || b.qty-a.qty)
     .slice(0,20);
 
+  /* Last 7 days / Past 7 days / Current vs Previous month withdrawal qty,
+     per fast-moving SKU — fixed windows relative to today (not the
+     Activity period filter above), since these are trend comparisons
+     ("this week vs last week", "this month vs last month"), not totals
+     for a selected reporting period. Scoped to current site selector. */
+  const fmToday = new Date();
+  function fmDaysAgo(n){ const d = new Date(fmToday); d.setDate(d.getDate()-n); return fmtDateLocal(d); }
+  const last7From = fmDaysAgo(6), last7To = fmtDateLocal(fmToday);
+  const past7From = fmDaysAgo(13), past7To = fmDaysAgo(7);
+  const curMonFrom = `${fmToday.getFullYear()}-${pad2(fmToday.getMonth()+1)}-01`;
+  const curMonTo = fmtDateLocal(fmToday);
+  const prevMonRef = new Date(fmToday.getFullYear(), fmToday.getMonth()-1, 1);
+  const prevMonFrom = `${prevMonRef.getFullYear()}-${pad2(prevMonRef.getMonth()+1)}-01`;
+  const prevMonTo = fmtDateLocal(new Date(fmToday.getFullYear(), fmToday.getMonth(), 0));
+  function fmQtyInRange(skuId, from, to){
+    return scopedWithdrawals().filter(w=>w.sku===skuId && w.date>=from && w.date<=to).reduce((a,w)=>a+Number(w.qty),0);
+  }
+  function fmTrend(cur, prev){
+    if(prev===0 && cur===0) return `<span style="color:var(--text-faint);">— 0%</span>`;
+    if(prev===0) return `<span style="color:var(--good);font-weight:700;">▲ New</span>`;
+    const pct = Math.round((cur-prev)/prev*100);
+    if(pct>0) return `<span style="color:var(--good);font-weight:700;">▲ +${pct}%</span>`;
+    if(pct<0) return `<span style="color:var(--none);font-weight:700;">▼ ${pct}%</span>`;
+    return `<span style="color:var(--text-faint);">— 0%</span>`;
+  }
+  fastMoving.forEach(u=>{
+    u.last7 = fmQtyInRange(u.sku, last7From, last7To);
+    u.past7 = fmQtyInRange(u.sku, past7From, past7To);
+    u.curMon = fmQtyInRange(u.sku, curMonFrom, curMonTo);
+    u.prevMon = fmQtyInRange(u.sku, prevMonFrom, prevMonTo);
+  });
+
   /* Top 10 SKUs that currently have stock on hand but haven't had a single
      receiving, withdrawal, return, or adjustment in the last 3 months (90
      days) — a fixed 3-month window regardless of the Activity period
@@ -2172,8 +2204,8 @@ function renderDashboard(){
       <div class="card card-pad">
         <div class="section-head" style="margin-bottom:10px;"><h3 style="font-size:16px;">Top 20 fast moving SKUs (Withdrawal)</h3><p>Ranked by how often withdrawn ${isOverall()?"across all sites":`at ${esc(siteName(currentSite))}`} · ${dashDateFilterLabel()}</p></div>
         ${fastMoving.length ? `<div class="table-wrap"><table>
-          <thead><tr><th>SKU #</th><th>Description</th><th>Times Withdrawn</th><th>Total Qty</th><th>Last Withdrawn</th></tr></thead>
-          <tbody>${fastMoving.map(u=>`<tr><td class="mono">${esc(u.sku)}</td><td>${esc(u.name)}</td><td class="mono" style="font-weight:700;">${fmtInt(u.count)}</td><td class="mono">${fmtInt(u.qty)}</td><td class="mono">${esc(u.lastDate||"—")}</td></tr>`).join("")}</tbody>
+          <thead><tr><th>SKU #</th><th>Description</th><th>Times Withdrawn</th><th>Total Qty</th><th>Last 7 Days</th><th>Past 7 Days</th><th>Monthly (Current vs Previous)</th><th>Last Withdrawn</th></tr></thead>
+          <tbody>${fastMoving.map(u=>`<tr><td class="mono">${esc(u.sku)}</td><td>${esc(u.name)}</td><td class="mono" style="font-weight:700;">${fmtInt(u.count)}</td><td class="mono">${fmtInt(u.qty)}</td><td class="mono">${fmtInt(u.last7)} <span style="font-size:11px;">${fmTrend(u.last7,u.past7)}</span></td><td class="mono">${fmtInt(u.past7)}</td><td class="mono">${fmtInt(u.curMon)} vs ${fmtInt(u.prevMon)} <span style="font-size:11px;">${fmTrend(u.curMon,u.prevMon)}</span></td><td class="mono">${esc(u.lastDate||"—")}</td></tr>`).join("")}</tbody>
         </table></div>` : `<div class="empty-state">${icon("out")}<p>No withdrawal records ${isOverall()?"yet":"for this site yet"} in this period.</p></div>`}
       </div>`;
 
