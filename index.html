@@ -1538,7 +1538,8 @@ function displaySkuCost(skuId){
    actually been received or withdrawn before — a brand-new SKU that was
    never received or withdrawn simply has no activity yet, not depleted stock. */
 function hasStockActivity(skuId){
-  return scopedReceiving().some(r=>r.sku===skuId) || scopedWithdrawals().some(w=>w.sku===skuId);
+  return scopedReceiving().some(r=>r.sku===skuId) || scopedWithdrawals().some(w=>w.sku===skuId) ||
+    scopedTransfersIn().some(t=>t.sku===skuId) || scopedTransfersOut().some(t=>t.sku===skuId);
 }
 /* Broader "any transaction at all" check for a SKU at the current site —
    covers receiving, withdrawals, returns, adjustments, and transfers
@@ -1573,6 +1574,27 @@ function onHandAtSite(skuId, siteId, excludeTransferId){
   const retIn = db.returns.filter(r=>r.sku===skuId && String(r.site)===String(siteId) && r.type==="Unused Return").reduce((a,r)=>a+Number(r.qty),0);
   const retOut = db.returns.filter(r=>r.sku===skuId && String(r.site)===String(siteId) && r.type==="Wrong Delivery").reduce((a,r)=>a+Number(r.qty),0);
   return rec - wd + adj + tIn - tOut + retIn - retOut;
+}
+/* On-hand for EVERY SKU at one site in a single pass over the ledgers --
+   same maths as onHandAtSite(), used by the Dashboard's Stock by Site
+   widget so it doesn't rescan the whole database once per SKU per site. */
+function siteOnHandMap(siteId){
+  const sid = String(siteId);
+  const m = {};
+  const add = (sku,n)=>{ m[sku] = (m[sku]||0) + (Number(n)||0); };
+  db.receiving.forEach(r=>{ if(String(r.site)===sid) add(r.sku, r.qty); });
+  db.withdrawals.forEach(w=>{ if(String(w.site)===sid) add(w.sku, -Number(w.qty)); });
+  db.adjustments.forEach(a=>{ if(String(a.site)===sid) add(a.sku, a.variance); });
+  db.returns.forEach(r=>{
+    if(String(r.site)!==sid) return;
+    if(r.type==="Unused Return") add(r.sku, r.qty);
+    else if(r.type==="Wrong Delivery") add(r.sku, -Number(r.qty));
+  });
+  db.transfers.forEach(t=>{
+    if(String(t.toSite)===sid && isTransferReceived(t)) add(t.sku, transferReceivedQty(t));
+    if(String(t.fromSite)===sid) add(t.sku, -Number(t.qty));
+  });
+  return m;
 }
 function stockStatus(skuId){
   const s = skuObj(skuId); if(!s) return {label:"No Stock", cls:"none"};
@@ -1681,8 +1703,10 @@ function closeTfReceiveConfirm(){
 function commitTransferReceipt(id, receivedQty, receivedRemarks){
   const t = db.transfers.find(x=>x.id===id);
   if(!t) return;
+  backfillTransferAllocs(); // make sure the lots being received are known
   t.status = "received";
   t.receivedDate = todayStr();
+  t.receivedTimestamp = nowTimestamp();
   if(receivedQty!=null){
     t.receivedQty = receivedQty;
     t.receivedRemarks = receivedRemarks || "";
@@ -1897,6 +1921,8 @@ const DASHBOARD_WIDGETS = [
   {key:"recentReceiving", label:"Recent Receiving"},
   {key:"recentWithdrawal", label:"Recent Withdrawals"},
   {key:"recentReturns", label:"Recent Returns"},
+  {key:"siteStock", label:"Stock by Site (on-hand, value and transfers received)"},
+  {key:"recentTransfers", label:"Recent Transfers Received"},
 ];
 function defaultDashboardPrefs(){
   const p = {};
@@ -2107,6 +2133,10 @@ function renderDashboard(){
     scopedWithdrawals().filter(w=>w.sku===skuId).forEach(w=>dates.push(w.date));
     scopedReturns().filter(r=>r.sku===skuId).forEach(r=>dates.push(r.date));
     scopedAdjustments().filter(a=>a.sku===skuId).forEach(a=>dates.push(a.date));
+    // A transfer is a transaction too: stock that just arrived from another
+    // site (or just left for one) is not "idle".
+    scopedTransfersIn().filter(t=>t.sku===skuId).forEach(t=>dates.push(t.receivedDate||t.date));
+    scopedTransfersOut().filter(t=>t.sku===skuId).forEach(t=>dates.push(t.date));
     return dates.length ? dates.sort().slice(-1)[0] : null;
   }
   const deadStock = db.skus
@@ -2115,6 +2145,40 @@ function renderDashboard(){
     .filter(d=> !d.lastDate || d.lastDate < deadStockCutoff)
     .sort((a,b)=> b.value-a.value)
     .slice(0,10);
+
+  /* Recent Transfers Received -- transfers the To Site has confirmed as
+     Received (these are what actually landed in stock). Scoped to the current
+     site selector (received AT this site) + the Activity period, by the
+     date the receipt was confirmed. */
+  const recentTransfers = [...scopedTransfersIn()]
+    .filter(t=>dashInRange(t.receivedDate||t.date))
+    .sort((a,b)=> String(b.receivedDate||b.date).localeCompare(String(a.receivedDate||a.date)) || (b.id-a.id))
+    .slice(0,5);
+
+  /* Stock by Site -- one row per site (every active site on Overall, just
+     the selected site otherwise). On-hand units / SKUs / value are current
+     balances and already include transfers received minus transfers sent
+     out; Transfer In / Out follow the Activity period; "For Receive" is
+     what is still in transit towards the site (not in stock yet). */
+  const siteStockRows = (isOverall() ? activeSites() : [siteObj(currentSite)].filter(Boolean)).map(site=>{
+    const sid = String(site.id);
+    const ohMap = siteOnHandMap(sid);
+    let skus=0, units=0, value=0;
+    Object.keys(ohMap).forEach(sku=>{
+      const q = ohMap[sku];
+      if(q>0 && skuObj(sku)){ skus++; units+=q; value+=skuBatchValue(sku, sid); }
+    });
+    let tIn=0, tOut=0, pendUnits=0, pendCount=0;
+    db.transfers.forEach(t=>{
+      if(String(t.toSite)===sid){
+        if(isTransferReceived(t)){ if(dashInRange(t.receivedDate||t.date)) tIn += transferReceivedQty(t); }
+        else { pendUnits += Number(t.qty)||0; pendCount++; }
+      }
+      if(String(t.fromSite)===sid && dashInRange(t.date)) tOut += Number(t.qty)||0;
+    });
+    return {site, skus, units, value, tIn, tOut, pendUnits, pendCount};
+  });
+  const siteStockTotals = siteStockRows.reduce((a,r)=>({skus:a.skus+r.skus, units:a.units+r.units, value:a.value+r.value, tIn:a.tIn+r.tIn, tOut:a.tOut+r.tOut, pendUnits:a.pendUnits+r.pendUnits, pendCount:a.pendCount+r.pendCount}), {skus:0,units:0,value:0,tIn:0,tOut:0,pendUnits:0,pendCount:0});
 
   const total = good+crit+none || 1;
   const gDeg = good/total*360, cDeg = crit/total*360, nDeg = none/total*360;
@@ -2262,6 +2326,33 @@ function renderDashboard(){
         </table></div>
       </div>`;
 
+  const siteStockRowHtml = r => `<tr>
+      <td><strong>${esc(r.site.name)}</strong></td>
+      <td class="mono">${fmtInt(r.skus)}</td>
+      <td class="mono" style="font-weight:700;">${fmtInt(r.units)}</td>
+      <td class="mono">${fmtMoney(r.value)}</td>
+      <td class="mono" style="color:${r.tIn>0?'var(--good)':'inherit'};">${r.tIn>0?'+':''}${fmtInt(r.tIn)}</td>
+      <td class="mono">${r.tOut>0?'-':''}${fmtInt(r.tOut)}</td>
+      <td class="mono" style="color:${r.pendCount>0?'var(--critical)':'var(--text-faint)'};">${r.pendCount>0 ? `${fmtInt(r.pendUnits)} (${r.pendCount} transfer${r.pendCount===1?'':'s'})` : '—'}</td>
+    </tr>`;
+  const siteStockHtml = `
+      <div class="card card-pad">
+        <div class="section-head" style="margin-bottom:10px;"><h3 style="font-size:16px;">Stock by site</h3><p>On-hand and value per site include transfers received; Transfer In / Out follow the ${dashDateFilterLabel()}</p></div>
+        ${siteStockRows.length ? `<div class="table-wrap"><table>
+          <thead><tr><th>Site</th><th>SKUs In Stock</th><th>On-Hand Units</th><th>Stock Value</th><th>Transfer In</th><th>Transfer Out</th><th>For Receive</th></tr></thead>
+          <tbody>${siteStockRows.map(siteStockRowHtml).join("")}${siteStockRows.length>1 ? `<tr style="font-weight:700;border-top:2px solid var(--border);"><td>All sites</td><td class="mono">${fmtInt(siteStockTotals.skus)}</td><td class="mono">${fmtInt(siteStockTotals.units)}</td><td class="mono">${fmtMoney(siteStockTotals.value)}</td><td class="mono">${siteStockTotals.tIn>0?'+':''}${fmtInt(siteStockTotals.tIn)}</td><td class="mono">${siteStockTotals.tOut>0?'-':''}${fmtInt(siteStockTotals.tOut)}</td><td class="mono">${siteStockTotals.pendCount>0 ? `${fmtInt(siteStockTotals.pendUnits)} (${siteStockTotals.pendCount})` : '—'}</td></tr>` : ""}</tbody>
+        </table></div>` : `<div class="empty-state">${icon("box")}<p>No sites to show.</p></div>`}
+      </div>`;
+
+  const recentTransfersHtml = `
+      <div class="card card-pad">
+        <div class="section-head" style="margin-bottom:10px;"><h3 style="font-size:16px;">Recent transfers received</h3><p>${isOverall()?"Across all sites":`Received at ${esc(siteName(currentSite))}`} · ${dashDateFilterLabel()}</p></div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Received</th><th>SKU</th><th>From</th>${isOverall()?"<th>To</th>":""}<th>Qty</th></tr></thead>
+          <tbody>${recentTransfers.map(t=>`<tr><td class="mono">${esc(t.receivedDate||t.date)}</td><td class="mono">${esc(t.sku)}</td><td>${esc(siteName(t.fromSite))}</td>${isOverall()?`<td>${esc(siteName(t.toSite))}</td>`:""}<td>${fmtInt(transferReceivedQty(t))}${hasTransferDiscrepancy(t)?` <span style="color:var(--none);font-size:11px;">(of ${fmtInt(t.qty)})</span>`:""}</td></tr>`).join("") || `<tr><td colspan="${isOverall()?5:4}" style="color:var(--text-faint)">No transfers received in this period</td></tr>`}</tbody>
+        </table></div>
+      </div>`;
+
   /* Pair widgets into grid-2 rows; a row only renders if at least one of its two widgets is enabled */
   const gridRow = (a,b) => (a||b) ? `<div class="grid-2">${a||""}${b||""}</div>` : "";
   const anyVisible = DASHBOARD_WIDGETS.some(w=>dashboardPrefs[w.key]);
@@ -2293,7 +2384,8 @@ function renderDashboard(){
     ${gridRow("", dashboardPrefs.fastMoving?fastMovingHtml:"")}
     ${gridRow(dashboardPrefs.deadStock?deadStockHtml:"", dashboardPrefs.turnaround?turnaroundHtml:"")}
     ${gridRow(dashboardPrefs.recentReceiving?recentReceivingHtml:"", dashboardPrefs.recentWithdrawal?recentWithdrawalHtml:"")}
-    ${gridRow(dashboardPrefs.recentReturns?recentReturnsHtml:"", "")}
+    ${gridRow(dashboardPrefs.recentReturns?recentReturnsHtml:"", dashboardPrefs.recentTransfers?recentTransfersHtml:"")}
+    ${dashboardPrefs.siteStock ? `<div style="margin-bottom:18px;">${siteStockHtml}</div>` : ""}
     ${anyVisible ? "" : `<div class="empty-state">${icon("layers")}<p>All widgets are hidden. Use Customize Dashboard to turn some back on.</p></div>`}
   `;
   document.getElementById("dashDateFilterSelect").addEventListener("change",(e)=>{
@@ -3047,29 +3139,106 @@ function generateBatchNumber(siteId, skuId, dateStr){
    that batch minus total already withdrawn against that batch (an
    in-progress edit's own prior qty is excluded via excludeId so editing
    doesn't double-count itself out of the pool). */
+/* ===== Transfer-aware batch ledger =====
+   Batches live per (SKU, Site). Transfers move stock between sites, so the
+   ledger has to move batch lots with them:
+     - DISPATCH (From Site): the transfer records t.alloc -- the oldest
+       batches at the From Site it drew from (FIFO), qty + cost per batch.
+       Those quantities are consumed from the From Site's batches straight
+       away, exactly like a withdrawal, so the From Site can't withdraw units
+       that already left and its Stock Value drops.
+     - RECEIPT (To Site): once the transfer is Received, the same lots
+       (same batch #, same cost) are added to the To Site's ledger, limited
+       to the quantity actually received. Received stock can therefore be
+       withdrawn (FIFO) and is valued at the cost it was originally
+       received at. In-Transit stock is on neither site's ledger.
+   Any part of a transfer that has no batch behind it (on-hand created by
+   cycle-count adjustments/returns, which don't carry batches) lands at the
+   To Site as an "untraced" lot named TRF-<id> at the transfer's cost. */
+function transferAllocLots(t){ return Array.isArray(t.alloc) ? t.alloc : []; }
+function transferInLots(t){
+  if(!isTransferReceived(t)) return [];
+  let toPlace = transferReceivedQty(t);
+  if(!(toPlace>0)) return [];
+  const lots = [];
+  for(const a of transferAllocLots(t)){
+    if(toPlace<=0) break;
+    const q = Math.min(Number(a.qty)||0, toPlace);
+    if(q>0){
+      lots.push({batch: a.batch || ("TRF-"+t.id), qty:q, cost:Number(a.cost)||0, ts:a.ts || t.timestamp || t.date, viaTransfer:t});
+      toPlace -= q;
+    }
+  }
+  // Nothing allocated (older record / no batch behind it), or more received
+  // than was dispatched -- the remainder still has to be withdrawable.
+  if(toPlace>0) lots.push({batch:"TRF-"+t.id, qty:toPlace, cost:Number(t.cost)||0, ts:t.receivedDate || t.date, viaTransfer:t});
+  return lots;
+}
+function transferOutBatchQty(skuId, siteId, batch, excludeTransferId){
+  let sum = 0;
+  db.transfers.forEach(t=>{
+    if(t.sku!==skuId || String(t.fromSite)!==String(siteId) || t.id===excludeTransferId) return;
+    transferAllocLots(t).forEach(a=>{ if(a.batch && a.batch===batch) sum += Number(a.qty)||0; });
+  });
+  return sum;
+}
 function skuBatchLedger(skuId, siteId){
-  const recs = db.receiving.filter(r=>r.sku===skuId && String(r.site)===String(siteId));
-  recs.sort((a,b)=> String(a.timestamp||a.date).localeCompare(String(b.timestamp||b.date)) || (a.id-b.id));
+  const lots = db.receiving
+    .filter(r=>r.sku===skuId && String(r.site)===String(siteId))
+    .map(r=>({batch:r.batch || "--", qty:Number(r.qty)||0, cost:Number(r.cost)||0, ts:String(r.timestamp||r.date), id:r.id}));
+  db.transfers.forEach(t=>{
+    if(t.sku!==skuId || String(t.toSite)!==String(siteId)) return;
+    transferInLots(t).forEach(l=>lots.push({batch:l.batch, qty:l.qty, cost:l.cost, ts:String(l.ts||""), id:t.id}));
+  });
+  lots.sort((a,b)=> a.ts.localeCompare(b.ts) || (a.id-b.id));
   const order = [];
   const totals = {};
   const costTotals = {}; // sum of qty*cost per batch, for a qty-weighted average cost
-  recs.forEach(r=>{
-    const b = r.batch || "—";
-    if(!(b in totals)){ totals[b]=0; costTotals[b]=0; order.push(b); }
-    totals[b] += Number(r.qty)||0;
-    costTotals[b] += (Number(r.qty)||0) * (Number(r.cost)||0);
+  const firstTs = {};
+  lots.forEach(l=>{
+    const b = l.batch;
+    if(!(b in totals)){ totals[b]=0; costTotals[b]=0; firstTs[b]=l.ts; order.push(b); }
+    totals[b] += l.qty;
+    costTotals[b] += l.qty * l.cost;
   });
-  return order.map(b=>({batch:b, received:totals[b], cost: totals[b]>0 ? costTotals[b]/totals[b] : 0}));
+  return order.map(b=>({batch:b, received:totals[b], cost: totals[b]>0 ? costTotals[b]/totals[b] : 0, ts:firstTs[b]}));
 }
-function batchWithdrawnQty(skuId, siteId, batch, excludeId){
-  return db.withdrawals
+function batchWithdrawnQty(skuId, siteId, batch, excludeId, excludeTransferId){
+  const wd = db.withdrawals
     .filter(w=>w.sku===skuId && String(w.site)===String(siteId) && w.batch===batch && w.id!==excludeId)
     .reduce((a,w)=>a+(Number(w.qty)||0),0);
+  return wd + transferOutBatchQty(skuId, siteId, batch, excludeTransferId);
 }
-function batchRemainingList(skuId, siteId, excludeId){
+function batchRemainingList(skuId, siteId, excludeId, excludeTransferId){
   return skuBatchLedger(skuId, siteId).map(b=>{
-    const withdrawn = batchWithdrawnQty(skuId, siteId, b.batch, excludeId);
-    return {batch:b.batch, received:b.received, withdrawn, remaining:b.received-withdrawn, cost:b.cost};
+    const withdrawn = batchWithdrawnQty(skuId, siteId, b.batch, excludeId, excludeTransferId);
+    return {batch:b.batch, received:b.received, withdrawn, remaining:b.received-withdrawn, cost:b.cost, ts:b.ts};
+  });
+}
+/* Picks which From Site batches a new/edited transfer draws from (oldest
+   first) -- stored on the transfer as t.alloc. */
+function allocateTransferBatches(skuId, fromSite, qty, fallbackCost, excludeTransferId){
+  let need = Number(qty)||0;
+  const out = [];
+  batchRemainingList(skuId, fromSite, null, excludeTransferId).forEach(b=>{
+    if(need<=0 || b.remaining<=0) return;
+    const q = Math.min(b.remaining, need);
+    out.push({batch:b.batch, qty:q, cost:b.cost, ts:b.ts});
+    need -= q;
+  });
+  if(need>0) out.push({batch:"", qty:need, cost:Number(fallbackCost)||0, ts:""}); // untraced remainder
+  return out;
+}
+/* Transfers saved before batch tracking existed have no t.alloc yet.
+   Allocate them once, oldest first (so a later transfer can draw on lots an
+   earlier one delivered), and persist so every device agrees. */
+function backfillTransferAllocs(){
+  const missing = db.transfers.filter(t=>!Array.isArray(t.alloc));
+  if(!missing.length) return;
+  missing.sort((a,b)=> String(a.timestamp||a.date).localeCompare(String(b.timestamp||b.date)) || (a.id-b.id));
+  missing.forEach(t=>{
+    t.alloc = allocateTransferBatches(t.sku, t.fromSite, t.qty, t.cost, t.id);
+    saveRecordItem("transfers", t);
   });
 }
 function pickOldestBatch(skuId, siteId, excludeId){
@@ -3091,7 +3260,10 @@ function skuBatchValue(skuId, siteId){
    just the currently selected site. */
 function skuStockValue(skuId){
   if(isOverall()){
-    const siteIds = [...new Set(db.receiving.filter(r=>r.sku===skuId).map(r=>String(r.site)))];
+    const siteIds = [...new Set([
+      ...db.receiving.filter(r=>r.sku===skuId).map(r=>String(r.site)),
+      ...db.transfers.filter(t=>t.sku===skuId).map(t=>String(t.toSite)),
+    ])];
     return siteIds.reduce((a,siteId)=>a + skuBatchValue(skuId, siteId), 0);
   }
   return skuBatchValue(skuId, currentSite);
@@ -5063,10 +5235,11 @@ function printRequestForm(id){
    ============================================================
    A transfer decrements on-hand at the From Site and increments it at
    the To Site — see onHand()/onHandAtSite(). Quantity is validated
-   against the live on-hand at the From Site (not a batch — transfers
-   deliberately don't try to preserve Receiving's per-batch FIFO chain
-   across sites, since a transferred unit's batch traceability lives on
-   in the Repository's history either way). */
+   against the live on-hand at the From Site. Batches DO travel with the
+   transfer: dispatch consumes the oldest From Site batches (t.alloc) and a
+   Received transfer adds those same lots (same batch #, same cost) to the
+   To Site -- see "Transfer-aware batch ledger" above skuBatchLedger(). That
+   is what makes received stock withdrawable and valued at the To Site. */
 let transferEditId = null;
 let tfStatusFilter = "All";
 let tfSelected = new Set();
@@ -5170,9 +5343,8 @@ function renderTransfer(){
    falling back to the SKU's flat catalog cost if no batch is available.
    Only touches the field while it hasn't been manually edited (tracked via
    the "touched" data attribute), same override behavior as Withdrawal.
-   Transfer still doesn't track/consume a specific batch for quantity
-   purposes (see note above renderTransfer) — this only mirrors how the
-   Cost per Unit value itself is captured. */
+   The batches actually consumed are locked in on save (t.alloc, see
+   commitTf) -- this only pre-fills the Cost per Unit field. */
 function refreshTfCostPick(){
   const skuEl = document.getElementById("f_tf_sku");
   const fromEl = document.getElementById("f_tf_from");
@@ -5276,6 +5448,9 @@ function saveTf(){
   ], ()=>commitTf(rec, isEdit));
 }
 function commitTf(rec, isEdit){
+  // Lock in which From Site batches this transfer draws from (FIFO) -- see
+  // the "Transfer-aware batch ledger" note above skuBatchLedger().
+  rec.alloc = allocateTransferBatches(rec.sku, rec.fromSite, rec.qty, rec.cost, isEdit ? rec.id : null);
   if(isEdit){
     const idx = db.transfers.findIndex(x=>x.id===rec.id);
     db.transfers[idx]=rec;
@@ -6654,23 +6829,35 @@ function filterHistoryByDate(history){
    auto-pick batches on Withdrawal (skuBatchLedger etc.), but aggregated
    across sites when viewing "Overall" instead of requiring one siteId. */
 function skuBatchAvailability(skuId){
-  const recs = scopedReceiving().filter(r=>r.sku===skuId);
-  recs.sort((a,b)=> String(a.timestamp||a.date).localeCompare(String(b.timestamp||b.date)) || (a.id-b.id));
+  const inScope = siteId => isOverall() || String(siteId)===String(currentSite);
+  const lots = scopedReceiving().filter(r=>r.sku===skuId)
+    .map(r=>({batch:r.batch||"--", site:r.site, qty:Number(r.qty)||0, ts:String(r.timestamp||r.date), id:r.id, receivedDate:r.date, delivery:r.delivery, viaTransfer:null}));
+  db.transfers.filter(t=>t.sku===skuId && inScope(t.toSite)).forEach(t=>{
+    transferInLots(t).forEach(l=>lots.push({batch:l.batch, site:t.toSite, qty:l.qty, ts:String(l.ts||""), id:t.id, receivedDate:t.receivedDate||t.date, delivery:"", viaTransfer:t}));
+  });
+  lots.sort((a,b)=> a.ts.localeCompare(b.ts) || (a.id-b.id));
+  const rows = {};
   const order = [];
-  const info = {};
-  recs.forEach(r=>{
-    const b = r.batch || "—";
-    if(!(b in info)){
-      info[b] = {batch:b, site:r.site, receivedDate:r.date, delivery:r.delivery, received:0};
-      order.push(b);
+  lots.forEach(l=>{
+    const k = String(l.site)+"|"+l.batch;
+    if(!(k in rows)){
+      rows[k] = {batch:l.batch, site:l.site, receivedDate:l.receivedDate, delivery:l.delivery, received:0, withdrawn:0, viaTransfer:!!l.viaTransfer, fromSite:l.viaTransfer ? l.viaTransfer.fromSite : null};
+      order.push(k);
     }
-    info[b].received += Number(r.qty)||0;
+    rows[k].received += l.qty;
   });
-  return order.map(b=>{
-    const rec = info[b];
-    const withdrawn = scopedWithdrawals().filter(w=>w.sku===skuId && w.batch===b).reduce((a,w)=>a+(Number(w.qty)||0),0);
-    return {...rec, withdrawn, remaining:rec.received-withdrawn};
+  scopedWithdrawals().filter(w=>w.sku===skuId).forEach(w=>{
+    const k = String(w.site)+"|"+w.batch;
+    if(k in rows) rows[k].withdrawn += Number(w.qty)||0;
   });
+  // Units of a batch sent out on a transfer leave that site's batch too.
+  db.transfers.filter(t=>t.sku===skuId && inScope(t.fromSite)).forEach(t=>{
+    transferAllocLots(t).forEach(a=>{
+      const k = String(t.fromSite)+"|"+a.batch;
+      if(a.batch && k in rows) rows[k].withdrawn += Number(a.qty)||0;
+    });
+  });
+  return order.map(k=>({...rows[k], remaining:rows[k].received-rows[k].withdrawn}));
 }
 function renderRepository(){
   const el = document.getElementById("content");
@@ -6737,18 +6924,18 @@ function renderRepoBody(){
     <div class="kpi-row">
       <div class="kpi accent-bar"><div class="label">Total Received</div><div class="value">${fmtInt(rec)}</div></div>
       <div class="kpi accent-bar"><div class="label">Total Withdrawn</div><div class="value">${fmtInt(wd)}</div></div>
-      <div class="kpi good-bar"><div class="label">Current On Hand</div><div class="value">${fmtInt(st.qty)}</div></div>
+      <div class="kpi good-bar"><div class="label">Current On Hand</div><div class="value">${fmtInt(st.qty)}</div>${(()=>{ const nt = onHandBreakdown(s.id).transfer; return nt!==0 ? `<div class="sub">${nt>0?"+":""}${fmtInt(nt)} net via transfers</div>` : ""; })()}</div>
       <div class="kpi ${st.cls==='good'?'good-bar':st.cls==='critical'?'crit-bar':'none-bar'}"><div class="label">Status</div><div class="value" style="font-size:20px;margin-top:10px;">${badge(st)}</div></div>
     </div>
     <div class="card card-pad">
       <div class="section-head" style="margin-bottom:10px;"><h3 style="font-size:16px;">${esc(s.id)} — ${esc(s.name)} · Batch Number Ledger · ${esc(siteName(currentSite))}</h3></div>
       <div class="table-wrap"><table>
-        <thead><tr><th>Batch #</th><th>Site</th><th>Delivery Date</th><th>Received</th><th>Withdrawn</th><th>Available Qty</th><th>Status</th></tr></thead>
+        <thead><tr><th>Batch #</th><th>Site</th><th>Delivery Date</th><th>Received</th><th>Withdrawn / Transferred Out</th><th>Available Qty</th><th>Status</th></tr></thead>
         <tbody>${batches.length ? batches.map(b=>`
           <tr>
             <td class="mono">${esc(b.batch)}</td>
             <td><span class="pill">${esc(siteName(b.site))}</span></td>
-            <td class="mono">${esc(b.delivery||b.receivedDate||"—")}</td>
+            <td class="mono">${b.viaTransfer ? `Transfer in from ${esc(siteName(b.fromSite))} · ${esc(b.receivedDate||"—")}` : esc(b.delivery||b.receivedDate||"—")}</td>
             <td class="mono">${fmtInt(b.received)}</td>
             <td class="mono">${fmtInt(b.withdrawn)}</td>
             <td class="mono" style="font-weight:700;color:${b.remaining>0?'var(--good)':'var(--text-faint)'};">${fmtInt(b.remaining)}</td>
@@ -6776,8 +6963,8 @@ function renderRepoBody(){
 }
 function exportRepoBatches(){
   const batches = skuBatchAvailability(repoSkuSelected);
-  downloadCSV(`batch_ledger_${repoSkuSelected}.csv`, ["Batch#","Site","DeliveryDate","Received","Withdrawn","AvailableQty","Status"],
-    batches.map(b=>[b.batch, siteName(b.site), b.delivery||b.receivedDate||"", b.received, b.withdrawn, b.remaining, b.remaining>0?"Available":"Exhausted"]));
+  downloadCSV(`batch_ledger_${repoSkuSelected}.csv`, ["Batch#","Site","DeliveryDate","Received","WithdrawnOrTransferredOut","AvailableQty","Status"],
+    batches.map(b=>[b.batch, siteName(b.site), (b.viaTransfer ? "Transfer in from "+siteName(b.fromSite)+" " : "")+(b.delivery||b.receivedDate||""), b.received, b.withdrawn, b.remaining, b.remaining>0?"Available":"Exhausted"]));
 }
 function exportRepoHistory(){
   const history = filterHistoryByDate(getSkuHistory(repoSkuSelected));
@@ -7843,6 +8030,7 @@ function exportModule(key){
    VIEW ROUTER
    ============================================================ */
 function renderView(id){
+  backfillTransferAllocs();
   if(document.getElementById("qrCountBackdrop").classList.contains("open")) closeQrCountModal();
   const map = { dashboard:renderDashboard, sku:renderSku, receiving:renderReceiving, requests:renderRequests, withdrawal:renderWithdrawal, returns:renderReturns, transfer:renderTransfer, summary:renderSummary, cyclecount:renderCycleCount, adjustment:renderAdjustment, repository:renderRepository, roster:renderRoster, trucks:renderTrucks, supplier:renderSupplierRoster, sites:renderSites, users:renderUsers, export:renderExport };
   (map[id] || renderDashboard)();
