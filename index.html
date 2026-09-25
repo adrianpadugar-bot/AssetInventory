@@ -1023,7 +1023,7 @@ let currentView = "dashboard";
    nav item — Parts Request — same as Requestor. isSinglePurposeAccount()
    below is the shared check used anywhere both roles need to be boxed
    into that one view. */
-const ADMIN_ONLY_VIEWS = ["roster","trucks","supplier","sites","users"];
+const ADMIN_ONLY_VIEWS = ["roster","trucks","supplier","sites","users","safetystock","validation"];
 function isAdmin(){ return !!(currentUser && currentUser.role==="Admin"); }
 function isRequestorOnly(){ return !!(currentUser && currentUser.role==="Requestor"); }
 function isApproverOnly(){ return !!(currentUser && currentUser.role==="Approver"); }
