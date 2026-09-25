@@ -622,7 +622,7 @@ let db = {
   ],
   skus: [
     {id:"BRK-001",name:"Brake Pad Set (Front)",category:"Brakes",uom:"Set",cost:850,truckUser:"Isuzu 10-Wheeler",reorder:20},
-    {id:"ENG-014",name:"Oil Filter",category:"Filters",uom:"Piece",cost:180,truckUser:"All Brands All Sizes",reorder:50},
+    {id:"ENG-014",name:"Oil Filter",category:"Filters",uom:"Piece",cost:180,truckUser:"All Brands All Sizes",reorder:50,activeTrucks:10,qtyPerTruck:1,pmIntervalDays:90},
     {id:"ELE-022",name:"Alternator 24V",category:"Electrical",uom:"Piece",cost:4200,truckUser:"Hino 10-Wheeler",reorder:5},
     {id:"SUS-007",name:"Leaf Spring",category:"Suspension",uom:"Piece",cost:2100,truckUser:"Fuso 6-Wheeler",reorder:8},
     {id:"TIR-003",name:"Tire 11R22.5",category:"Tires",uom:"Piece",cost:9500,truckUser:"All Brands 10-Wheeler",reorder:12},
@@ -948,8 +948,10 @@ const VIEWS = [
     {id:"returns", label:"Returns", sub:"Log wrong deliveries or unused parts returned", icon:"returnicon"},
     {id:"transfer", label:"Transfer", sub:"Move parts from one site to another", icon:"transfer"},
     {id:"summary", label:"Stock Summary", sub:"On-hand quantity and reorder status", icon:"layers"},
+    {id:"safetystock", label:"Safety Stock & Reorder", sub:"Recommended safety stock and reorder qty from 2-month usage history", icon:"calc"},
     {id:"cyclecount", label:"Cycle Count", sub:"Freeze quantities and reconcile physical counts", icon:"check"},
     {id:"adjustment", label:"Adjustment", sub:"Stock corrections posted from completed cycle counts", icon:"adjust"},
+    {id:"validation", label:"Validation", sub:"Flags Withdrawal vs Parts Request mismatches and suspicious duplicate plate/SKU pulls", icon:"shield"},
     {id:"repository", label:"Repository", sub:"Historical transactions per SKU", icon:"repo"},
   ]},
   {group:"People", items:[
@@ -992,6 +994,9 @@ const ICONS = {
   truck:'<path d="M2 16V7a1 1 0 011-1h9v10"/><path d="M12 10h4.5l3.5 3.5V16h-8z"/><circle cx="6.5" cy="18" r="1.8"/><circle cx="16.5" cy="18" r="1.8"/><path d="M2 13h6"/>',
   clipboard:'<rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4V3a1 1 0 011-1h4a1 1 0 011 1v1"/><path d="M9 4h6v2H9z"/><path d="M8.5 11h7"/><path d="M8.5 14.5h7"/><path d="M8.5 18h4"/>',
   returnicon:'<path d="M9 14l-5-5 5-5"/><path d="M4 9h10a6 6 0 016 6v1"/><path d="M20 21v-2a4 4 0 00-4-4h-2"/>',
+  calc:'<rect x="5" y="2.5" width="14" height="19" rx="2"/><path d="M8 6.5h8"/><path d="M8.5 11h.01M12 11h.01M15.5 11h.01M8.5 14.5h.01M12 14.5h.01M15.5 14.5h.01M8.5 18h.01M12 18h.01M15.5 18h.01"/>',
+  shield:'<path d="M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6l7-3z"/><path d="M9 12l2 2 4-4.5"/>',
+  alert:'<path d="M12 3l10 18H2z"/><path d="M12 9.5v4.5"/><path d="M12 17h.01"/>',
 };
 function icon(name, cls){ return `<svg class="${cls||''}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${ICONS[name]}</svg>`; }
 
@@ -1155,7 +1160,7 @@ function goTo(viewId){
   buildNav();
   const meta = VIEWS.flatMap(g=>g.items).find(i=>i.id===viewId);
   document.getElementById("topTitle").textContent = meta.label;
-  const siteAware = ["dashboard","sku","receiving","requests","withdrawal","transfer","summary","cyclecount","adjustment","repository","roster","export"].includes(viewId);
+  const siteAware = ["dashboard","sku","receiving","requests","withdrawal","transfer","summary","cyclecount","adjustment","validation","repository","roster","export"].includes(viewId);
   document.getElementById("topSub").textContent = siteAware ? `${meta.sub} · ${siteName(currentSite)}` : meta.sub;
   renderView(viewId);
   renderNotifBell();
@@ -4673,6 +4678,239 @@ function printConsolidatedWithdrawalReceipt(ids){
 }
 
 /* ============================================================
+   RENDER: VALIDATION
+   ------------------------------------------------------------
+   Read-only audit module — flags two kinds of exceptions across the
+   Withdrawal ledger. Nothing here writes to db; it's a cross-check
+   report over data already entered elsewhere.
+
+   1. Withdrawal vs Parts Request, matched on WO #:
+        - a Withdrawal whose WO # has no Parts Request at all
+        - a Withdrawal whose matching request is still Pending, or
+          was Rejected (i.e. never actually cleared for release)
+        - a Withdrawal for a SKU that doesn't appear as a line item
+          on its matching request(s) (free-text description, matched
+          loosely against the SKU name — see reqPartMatchesSku())
+        - total withdrawn qty for a WO#+SKU pair exceeding the total
+          requested qty for that same WO#+SKU pair
+
+   2. Same Plate #, different WO #, same SKU withdrawn within 7 days:
+        classic sign of a WO # typo, a split/duplicate withdrawal, or
+        a truck drawing the same part twice under two job numbers in
+        one week. Grouped by Plate+SKU, flags any pair of withdrawals
+        in that group whose WO # differs and whose dates are within a
+        rolling 7-day window of each other.
+   ============================================================ */
+/* Loose match between a Parts Request line's free-text description and
+   a catalog SKU's name/code — the request slip isn't SKU-coded, so this
+   is a normalized substring check in both directions, not an exact key
+   match. Good enough to support/refute a flag; a human still reviews it. */
+function normMatchText(s){ return String(s||"").toLowerCase().replace(/[^a-z0-9]+/g," ").trim(); }
+function reqPartMatchesSku(description, skuId){
+  const d = normMatchText(description);
+  if(!d) return false;
+  const name = normMatchText(skuName(skuId));
+  const code = normMatchText(skuId);
+  if(!name && !code) return false;
+  return (name && (d.includes(name) || name.includes(d))) || (code && d.includes(code));
+}
+function woKey(wo){ return String(wo||"").trim().toLowerCase(); }
+function plateKey(p){ return String(p||"").trim().toUpperCase(); }
+function daysBetween(dateA, dateB){
+  const a = new Date(dateA), b = new Date(dateB);
+  if(isNaN(a.getTime()) || isNaN(b.getTime())) return Infinity;
+  return Math.abs(a - b) / 86400000;
+}
+/* Section 1 — one row per Withdrawal that trips at least one check,
+   built against the currently-scoped Withdrawals/Requests (site or
+   Overall, same scoping as every other module). */
+function buildWoValidationRows(){
+  const withdrawals = scopedWithdrawals();
+  const requests = scopedRequests();
+  const reqsByWo = {};
+  requests.forEach(r=>{
+    const k = woKey(r.wo);
+    if(!k) return;
+    (reqsByWo[k] = reqsByWo[k] || []).push(r);
+  });
+  // Total withdrawn qty per WO#+SKU, so the qty check compares like-for-like
+  // even when a WO# was fulfilled across several separate Withdrawal entries.
+  const withdrawnByWoSku = {};
+  withdrawals.forEach(w=>{
+    const key = woKey(w.wo)+"|"+w.sku;
+    withdrawnByWoSku[key] = (withdrawnByWoSku[key]||0) + Number(w.qty||0);
+  });
+  const rows = [];
+  withdrawals.forEach(w=>{
+    const k = woKey(w.wo);
+    const matches = reqsByWo[k] || [];
+    const issues = [];
+    let requestedQtyForSku = null;
+    if(matches.length===0){
+      issues.push({type:"no_request", text:"No Parts Request found for this WO #"});
+    } else {
+      const statuses = new Set(matches.map(r=>r.status));
+      const hasCleared = matches.some(r=>r.status==="Approved"||r.status==="Served");
+      if(!hasCleared){
+        if(statuses.has("Rejected") && !statuses.has("Pending")){
+          issues.push({type:"rejected", text:"Matching Parts Request was Rejected"});
+        } else {
+          issues.push({type:"pending", text:"Matching Parts Request is still Pending (not yet Approved)"});
+        }
+      }
+      const matchedParts = [];
+      matches.forEach(r=>(r.parts||[]).forEach(p=>{ if(reqPartMatchesSku(p.description, w.sku)) matchedParts.push(p); }));
+      if(matchedParts.length===0){
+        issues.push({type:"sku_not_requested", text:"This SKU doesn't appear as a line item on the matching request"});
+      } else {
+        requestedQtyForSku = matchedParts.reduce((a,p)=>a+Number(p.qty||0),0);
+        const withdrawnTotal = withdrawnByWoSku[k+"|"+w.sku] || 0;
+        if(withdrawnTotal > requestedQtyForSku){
+          issues.push({type:"qty_exceeds", text:`Withdrawn qty for this WO#+SKU (${fmtInt(withdrawnTotal)}) exceeds requested qty (${fmtInt(requestedQtyForSku)})`});
+        }
+      }
+    }
+    if(issues.length){
+      rows.push({w, matches, issues, requestedQtyForSku});
+    }
+  });
+  return rows.sort((a,b)=> String(b.w.date||"").localeCompare(String(a.w.date||"")));
+}
+/* Section 2 — group scoped Withdrawals by Plate+SKU, then flag any pair
+   within a group whose WO # differs and whose dates fall within 7 days
+   of each other. Returns one row per Plate+SKU group that has at least
+   one such conflicting pair, with the full list of that group's entries
+   (not just the conflicting pair) so the reviewer sees the whole picture. */
+function buildPlateDuplicateGroups(){
+  const withdrawals = scopedWithdrawals();
+  const groups = {};
+  withdrawals.forEach(w=>{
+    const plate = plateKey(w.plate);
+    if(!plate) return; // no plate on record — nothing to correlate
+    const key = plate+"|"+w.sku;
+    (groups[key] = groups[key] || []).push(w);
+  });
+  const flagged = [];
+  Object.values(groups).forEach(entries=>{
+    if(entries.length<2) return;
+    const sorted = entries.slice().sort((a,b)=> String(a.date||"").localeCompare(String(b.date||"")));
+    let hasConflict = false;
+    const conflictIds = new Set();
+    for(let i=0;i<sorted.length;i++){
+      for(let j=i+1;j<sorted.length;j++){
+        if(woKey(sorted[i].wo)===woKey(sorted[j].wo)) continue;
+        if(daysBetween(sorted[i].date, sorted[j].date) <= 7){
+          hasConflict = true;
+          conflictIds.add(sorted[i].id); conflictIds.add(sorted[j].id);
+        }
+      }
+    }
+    if(hasConflict){
+      flagged.push({plate:sorted[0].plate, sku:sorted[0].sku, entries:sorted, conflictIds});
+    }
+  });
+  return flagged.sort((a,b)=> b.entries.length - a.entries.length);
+}
+function validationIssueBadge(type){
+  if(type==="no_request") return `<span class="badge badge-critical">${icon("alert",'')} No Request</span>`;
+  if(type==="pending") return `<span class="badge badge-role">Pending Approval</span>`;
+  if(type==="rejected") return `<span class="badge badge-critical">Rejected Request</span>`;
+  if(type==="sku_not_requested") return `<span class="badge badge-none">Not On Request</span>`;
+  if(type==="qty_exceeds") return `<span class="badge badge-none">Qty Exceeds Request</span>`;
+  return `<span class="badge badge-role">${esc(type)}</span>`;
+}
+function openWdFilteredByWo(wo){
+  goTo("withdrawal");
+  setTimeout(()=>{
+    wdSearch = wo;
+    const input = document.getElementById("wdSearchInput");
+    if(input) input.value = wo;
+    renderWdTable();
+  }, 30);
+}
+function openReqFilteredByWo(wo){
+  goTo("requests");
+  toast(`Showing Parts Requests — look for WO # ${wo}`);
+}
+function renderValidation(){
+  const el = document.getElementById("content");
+  const woRows = buildWoValidationRows();
+  const plateGroups = buildPlateDuplicateGroups();
+  const noReqCount = woRows.filter(r=>r.issues.some(i=>i.type==="no_request")).length;
+  const notClearedCount = woRows.filter(r=>r.issues.some(i=>i.type==="pending"||i.type==="rejected")).length;
+  const qtyCount = woRows.filter(r=>r.issues.some(i=>i.type==="qty_exceeds"||i.type==="sku_not_requested")).length;
+  const plateFlagCount = plateGroups.reduce((a,g)=>a+g.conflictIds.size,0);
+
+  el.innerHTML = `
+    <div class="kpi-row">
+      <div class="kpi crit-bar"><div class="label">No Matching Request</div><div class="value">${fmtInt(noReqCount)}</div><div class="sub">Withdrawal's WO # has no Parts Request</div></div>
+      <div class="kpi crit-bar"><div class="label">Not Cleared</div><div class="value">${fmtInt(notClearedCount)}</div><div class="sub">Matching request is Pending or Rejected</div></div>
+      <div class="kpi none-bar"><div class="label">SKU / Qty Mismatch</div><div class="value">${fmtInt(qtyCount)}</div><div class="sub">Off the request slip, or over the requested qty</div></div>
+      <div class="kpi none-bar"><div class="label">Plate Duplicate Flags</div><div class="value">${fmtInt(plateFlagCount)}</div><div class="sub">Same plate + SKU, different WO #, within 7 days</div></div>
+    </div>
+
+    <div class="section-head" style="margin-top:4px;">
+      <h3 style="font-size:16px;">Withdrawal vs Parts Request (by WO #)</h3>
+      <p>Every Withdrawal is checked against Parts Requests sharing its WO #. Rows below tripped at least one check — everything else lined up clean.</p>
+    </div>
+    <div class="table-wrap" style="margin-bottom:22px;">
+      <table>
+        <thead><tr><th>Date</th><th>Site</th><th>WO #</th><th>Plate #</th><th>SKU</th><th>Part Name</th><th>Qty W/D</th><th>Requested Qty</th><th>Issue(s)</th><th></th></tr></thead>
+        <tbody>
+          ${woRows.length ? woRows.map(r=>`
+            <tr>
+              <td class="mono">${esc(r.w.date)}</td>
+              <td>${esc(siteName(r.w.site))}</td>
+              <td class="mono">${esc(r.w.wo)||"—"}</td>
+              <td class="mono">${esc(r.w.plate)||"—"}</td>
+              <td class="mono">${esc(r.w.sku)}</td>
+              <td>${esc(skuName(r.w.sku))}</td>
+              <td class="mono">${fmtInt(r.w.qty)}</td>
+              <td class="mono">${r.requestedQtyForSku==null ? "—" : fmtInt(r.requestedQtyForSku)}</td>
+              <td>${r.issues.map(i=>`<div style="margin-bottom:3px;" title="${esc(i.text)}">${validationIssueBadge(i.type)}</div>`).join("")}</td>
+              <td style="white-space:nowrap;">
+                <button class="icon-btn" data-openwd="${esc(r.w.wo)}" title="Open in Withdrawal">${icon("out")}</button>
+                ${r.matches.length ? `<button class="icon-btn" data-openreq="${esc(r.w.wo)}" title="Open matching Parts Request">${icon("clipboard")}</button>` : ""}
+              </td>
+            </tr>
+          `).join("") : `<tr><td colspan="10" style="text-align:center;color:var(--text-dim);padding:20px;">No issues found — every withdrawn WO # matches an Approved/Served request with quantities in line.</td></tr>`}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="section-head">
+      <h3 style="font-size:16px;">Plate # — Same SKU Withdrawn Under Different WO #s Within 1 Week</h3>
+      <p>Groups withdrawals by Plate # + SKU, then flags any two entries in a group with different WO #s dated within 7 days of each other.</p>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Plate #</th><th>SKU</th><th>Part Name</th><th>Flagged Entries</th></tr></thead>
+        <tbody>
+          ${plateGroups.length ? plateGroups.map(g=>`
+            <tr>
+              <td class="mono">${esc(g.plate)}</td>
+              <td class="mono">${esc(g.sku)}</td>
+              <td>${esc(skuName(g.sku))}</td>
+              <td>
+                ${g.entries.map(w=>`
+                  <div style="margin-bottom:4px;${g.conflictIds.has(w.id)?'':'opacity:.55;'}">
+                    <span class="badge ${g.conflictIds.has(w.id)?'badge-none':'badge-role'}">${esc(w.date)}</span>
+                    WO ${esc(w.wo)||"—"} · Qty ${fmtInt(w.qty)} · ${esc(siteName(w.site))}
+                    <button class="icon-btn" style="vertical-align:middle;" data-openwd="${esc(w.wo)}" title="Open in Withdrawal">${icon("out")}</button>
+                  </div>
+                `).join("")}
+              </td>
+            </tr>
+          `).join("") : `<tr><td colspan="4" style="text-align:center;color:var(--text-dim);padding:20px;">No duplicate plate/SKU pulls found within any 7-day window.</td></tr>`}
+        </tbody>
+      </table>
+    </div>
+  `;
+  el.querySelectorAll("[data-openwd]").forEach(b=>b.addEventListener("click", ()=>openWdFilteredByWo(b.dataset.openwd)));
+  el.querySelectorAll("[data-openreq]").forEach(b=>b.addEventListener("click", ()=>openReqFilteredByWo(b.dataset.openreq)));
+}
+
+/* ============================================================
    RENDER: RETURNS (wrong deliveries sent back to a supplier, or
    unused withdrawn parts returned back to shelf stock)
    ------------------------------------------------------------
@@ -5729,6 +5967,158 @@ function renderSummaryTable(){
       <td>${badge(st)}</td>
     </tr>`;
   }).join("");
+}
+
+/* ============================================================
+   RENDER: SAFETY STOCK & REORDER PLANNING
+   Uses the last 60 days of Withdrawal records (scoped to the
+   selected site, same as Stock Summary) as the historical demand
+   signal (avg/std-dev of daily usage, for variability).
+
+   Active Trucks and Qty per Truck are entered manually per SKU
+   (Admin-editable right in this table) rather than derived from
+   withdrawal history — history only reflects trucks that happened
+   to draw the part inside the 60-day window, which undercounts
+   the real fleet for parts with a longer replacement cycle.
+
+   A second, scheduled demand signal is derived from those manual
+   fields: for a SKU on a standard PM replacement interval (e.g.
+   oil filter every 90 days, 1 per truck), the expected draw is
+   (Active Trucks × Qty per Truck ÷ Interval days) — independent
+   of what history shows yet, useful for thin-history parts with a
+   known replacement cadence.
+   Safety Stock = Z × stdDev(daily usage) × √(lead time days)
+   Reorder Qty  = ceil(max(historical avg, scheduled avg) × lead
+                  time days) + Safety Stock
+   "Apply" writes the suggested Reorder Qty into the SKU's existing
+   Reorder Quantity field (the same field Stock Summary's Critical
+   threshold already reads from).
+   ============================================================ */
+const SS_WINDOW_DAYS = 60;
+const SS_Z_TABLE = {"90":1.28,"95":1.65,"97.5":1.96,"99":2.33};
+let ssLeadTime = 7;
+let ssServiceLevel = "95";
+let ssOrderCycle = 14;
+let ssSearch = "";
+function ssUsageStats(skuId){
+  const cutoff = new Date(); cutoff.setDate(cutoff.getDate()-(SS_WINDOW_DAYS-1)); cutoff.setHours(0,0,0,0);
+  const byDay = {};
+  scopedWithdrawals().forEach(w=>{
+    if(w.sku!==skuId) return;
+    const d = new Date(w.date+"T00:00:00");
+    if(d < cutoff) return;
+    byDay[w.date] = (byDay[w.date]||0) + Number(w.qty);
+  });
+  const daily = [];
+  for(let i=0;i<SS_WINDOW_DAYS;i++){
+    const d = new Date(cutoff); d.setDate(d.getDate()+i);
+    daily.push(byDay[fmtDateLocal(d)] || 0);
+  }
+  const total = daily.reduce((a,b)=>a+b,0);
+  const avg = total/SS_WINDOW_DAYS;
+  const max = Math.max(0, ...daily);
+  const variance = daily.reduce((a,b)=>a+Math.pow(b-avg,2),0)/SS_WINDOW_DAYS;
+  const stdDev = Math.sqrt(variance);
+  return {total, avg, max, stdDev};
+}
+function ssRecommend(sku, leadTime, serviceLevel, orderCycle){
+  const st = ssUsageStats(sku.id);
+  const z = SS_Z_TABLE[serviceLevel]||1.65;
+  const safetyStock = Math.ceil(z * st.stdDev * Math.sqrt(leadTime));
+  const activeTrucks = Number(sku.activeTrucks)||0;
+  const qtyPerTruck = Number(sku.qtyPerTruck)||0;
+  const pmInterval = Number(sku.pmIntervalDays)||0;
+  const scheduledAvg = (pmInterval>0 && activeTrucks>0) ? (activeTrucks*(qtyPerTruck||1))/pmInterval : 0;
+  const demandAvg = Math.max(st.avg, scheduledAvg);
+  const reorderQty = Math.ceil(demandAvg*leadTime) + safetyStock;
+  const maxInventory = Math.ceil(demandAvg*(leadTime+orderCycle)) + safetyStock;
+  return {...st, activeTrucks, qtyPerTruck, scheduledAvg, demandAvg, safetyStock, reorderQty, maxInventory};
+}
+function renderSafetyStock(){
+  const el = document.getElementById("content");
+  el.innerHTML = `
+    <div class="toolbar">
+      <div class="search-box">${icon("search")}<input id="ssSearchInput" placeholder="Search SKU or name..." value="${esc(ssSearch)}"></div>
+      <div class="field" style="margin:0;"><label style="font-size:10.5px;">Lead Time (days)</label><input id="ssLeadTimeInput" type="number" min="1" step="1" style="width:80px;" value="${ssLeadTime}"></div>
+      <div class="field" style="margin:0;"><label style="font-size:10.5px;">Order Cycle (days)</label><input id="ssOrderCycleInput" type="number" min="1" step="1" style="width:80px;" value="${ssOrderCycle}"></div>
+      <div class="field" style="margin:0;"><label style="font-size:10.5px;">Service Level</label>
+        <select class="select-filter" id="ssServiceLevelInput">
+          ${optionList(["90","95","97.5","99"], ssServiceLevel).replace(/>(\d[\d.]*)</g,'>$1%<')}
+        </select>
+      </div>
+      <div class="spacer"></div>
+      <button class="btn" id="btnExportSafetyStock">${icon("download")} Export CSV</button>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>SKU #</th><th>Name</th><th>Active Trucks</th><th>Qty / Truck</th><th>PM Interval (days)</th><th>Withdrawn (${SS_WINDOW_DAYS}d)</th><th>Avg Daily Usage</th><th>Current Reorder Qty</th><th>Suggested Safety Stock</th><th>Suggested Reorder Qty</th><th>Max Inventory</th><th></th></tr></thead>
+        <tbody id="ssTbody"></tbody>
+      </table>
+    </div>
+    <p style="color:var(--text-faint);font-size:11.5px;margin-top:12px;"><strong>Active Trucks</strong> and <strong>Qty / Truck</strong> are entered manually per SKU (Admin) — the number of trucks currently fitted with/needing this part, and how many units each one takes per replacement (e.g. 1 oil filter, 4 brake pads). <strong>PM Interval</strong> is optional: for parts replaced on a standard preventive-maintenance schedule regardless of failure (e.g. oil filter every 90 days), set the interval and the demand used for Reorder Qty and Max Inventory becomes the higher of actual historical usage (last ${SS_WINDOW_DAYS} days${isOverall()?"":`, ${esc(siteObj(currentSite)?.name||"")}`}) or the scheduled rate (Active Trucks × Qty/Truck ÷ Interval) — useful for parts with thin history but a known replacement cadence. Leave Active Trucks/PM Interval blank for reactive/failure-driven parts, which then rely on historical usage only. Safety Stock = Service-Level Z-score × standard deviation of daily usage × √(Lead Time). Suggested Reorder Qty (reorder point) = (demand rate × Lead Time) + Safety Stock — the level that should trigger a new order. <strong>Max Inventory</strong> = (demand rate × (Lead Time + Order Cycle)) + Safety Stock — the stock level you'd be topping up to on a normal order, using Order Cycle as how often orders are placed. "Apply" overwrites that SKU's Reorder Quantity in the SKU Catalog, used across the app as its Critical-stock threshold.</p>
+  `;
+  document.getElementById("ssSearchInput").addEventListener("input",(e)=>{ssSearch=e.target.value; renderSafetyStockTable();});
+  document.getElementById("ssLeadTimeInput").addEventListener("input",(e)=>{ssLeadTime=Math.max(1,parseInt(e.target.value)||1); renderSafetyStockTable();});
+  document.getElementById("ssOrderCycleInput").addEventListener("input",(e)=>{ssOrderCycle=Math.max(1,parseInt(e.target.value)||1); renderSafetyStockTable();});
+  document.getElementById("ssServiceLevelInput").addEventListener("change",(e)=>{ssServiceLevel=e.target.value; renderSafetyStockTable();});
+  document.getElementById("btnExportSafetyStock").addEventListener("click", ()=>{
+    const rows = db.skus.map(s=>{
+      const r = ssRecommend(s, ssLeadTime, ssServiceLevel, ssOrderCycle);
+      return [s.id,s.name,s.activeTrucks||"",s.qtyPerTruck||"",s.pmIntervalDays||"",r.total,r.avg.toFixed(2),s.reorder,r.safetyStock,r.reorderQty,r.maxInventory];
+    });
+    downloadCSV(`safety_stock_reorder_${currentSite==="overall"?"overall":siteObj(currentSite)?.code||currentSite}.csv`, ["SKU#","Name","ActiveTrucks","QtyPerTruck","PMIntervalDays",`Withdrawn${SS_WINDOW_DAYS}d`,"AvgDailyUsage","CurrentReorderQty","SuggestedSafetyStock","SuggestedReorderQty","MaxInventory"], rows);
+  });
+  renderSafetyStockTable();
+}
+function ssEditableCell(sku, field, width){
+  const v = sku[field];
+  return isAdmin()
+    ? `<input type="number" min="0" step="1" class="mono" style="width:${width}px;" data-ss-field="${field}" data-ss-sku="${esc(sku.id)}" value="${v||''}" placeholder="—">`
+    : (v ? fmtInt(v) : "—");
+}
+function renderSafetyStockTable(){
+  const tbody = document.getElementById("ssTbody");
+  const q = ssSearch.trim().toLowerCase();
+  const rows = db.skus.filter(s=>!q || s.id.toLowerCase().includes(q) || s.name.toLowerCase().includes(q));
+  if(rows.length===0){ tbody.innerHTML = `<tr><td colspan="12"><div class="empty-state">${icon("calc")}<p>No SKUs match this view.</p></div></td></tr>`; return; }
+  tbody.innerHTML = rows.map(s=>{
+    const r = ssRecommend(s, ssLeadTime, ssServiceLevel, ssOrderCycle);
+    const changed = Number(s.reorder)!==r.reorderQty;
+    return `<tr>
+      <td class="mono">${esc(s.id)}</td>
+      <td>${esc(s.name)}</td>
+      <td>${ssEditableCell(s,"activeTrucks",64)}</td>
+      <td>${ssEditableCell(s,"qtyPerTruck",56)}</td>
+      <td>${ssEditableCell(s,"pmIntervalDays",64)}</td>
+      <td class="mono">${fmtInt(r.total)}</td>
+      <td class="mono">${r.avg.toFixed(2)}</td>
+      <td class="mono">${fmtInt(s.reorder)}</td>
+      <td class="mono" style="font-weight:700;">${fmtInt(r.safetyStock)}</td>
+      <td class="mono" style="font-weight:700;">${fmtInt(r.reorderQty)}</td>
+      <td class="mono" style="font-weight:700;">${fmtInt(r.maxInventory)}</td>
+      <td>${isAdmin() && changed ? `<button class="btn btn-sm" data-apply-ss="${esc(s.id)}" data-qty="${r.reorderQty}">Apply</button>` : (changed ? "" : "—")}</td>
+    </tr>`;
+  }).join("");
+  tbody.querySelectorAll("[data-apply-ss]").forEach(btn=>{
+    btn.addEventListener("click", ()=>{
+      const id = btn.getAttribute("data-apply-ss");
+      const qty = parseInt(btn.getAttribute("data-qty"))||0;
+      const s = db.skus.find(x=>x.id===id);
+      if(s){ s.reorder = qty; saveModule("skus"); toast(`Reorder qty for ${id} updated to ${fmtInt(qty)}`); renderSafetyStockTable(); }
+    });
+  });
+  tbody.querySelectorAll("[data-ss-field]").forEach(inp=>{
+    inp.addEventListener("change", ()=>{
+      const id = inp.getAttribute("data-ss-sku");
+      const field = inp.getAttribute("data-ss-field");
+      const s = db.skus.find(x=>x.id===id);
+      if(!s) return;
+      const val = parseInt(inp.value);
+      s[field] = (val>0) ? val : null;
+      saveModule("skus");
+      renderSafetyStockTable();
+    });
+  });
 }
 
 /* ============================================================
@@ -8038,7 +8428,7 @@ function exportModule(key){
 function renderView(id){
   backfillTransferAllocs();
   if(document.getElementById("qrCountBackdrop").classList.contains("open")) closeQrCountModal();
-  const map = { dashboard:renderDashboard, sku:renderSku, receiving:renderReceiving, requests:renderRequests, withdrawal:renderWithdrawal, returns:renderReturns, transfer:renderTransfer, summary:renderSummary, cyclecount:renderCycleCount, adjustment:renderAdjustment, repository:renderRepository, roster:renderRoster, trucks:renderTrucks, supplier:renderSupplierRoster, sites:renderSites, users:renderUsers, export:renderExport };
+  const map = { dashboard:renderDashboard, sku:renderSku, receiving:renderReceiving, requests:renderRequests, withdrawal:renderWithdrawal, returns:renderReturns, transfer:renderTransfer, summary:renderSummary, safetystock:renderSafetyStock, cyclecount:renderCycleCount, adjustment:renderAdjustment, validation:renderValidation, repository:renderRepository, roster:renderRoster, trucks:renderTrucks, supplier:renderSupplierRoster, sites:renderSites, users:renderUsers, export:renderExport };
   (map[id] || renderDashboard)();
 }
 
