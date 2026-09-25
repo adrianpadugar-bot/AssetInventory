@@ -612,7 +612,7 @@ const CC_REMARKS = ["Matched","Issued but not deducted","Transferred but not rec
    Count Review screen (initial review and after a 2nd blind count).
    "Matched" isn't offered here — it's assigned automatically when the
    counted qty equals the frozen system qty, no tag needed. */
-const CC_TAG_OPTIONS = ["Issued but not deducted","Transferred but not recorded","Stored in another location","Damaged/scrapped without documentation","Unexplained/Missing"];
+const CC_TAG_OPTIONS = ["Received but tagged to wrong SKU","Issued but not deducted","Transferred but not recorded","Stored in another location","Received but not recorded","Returned but not recorded","Wrong quantity recorded","Wrong SKU/Part recorded","Damaged/Scrapped without documentation","Pending Transaction","Unexplained/Missing"];
 const REQUEST_CATEGORIES = ["PMS","Repair"];
 
 let db = {
@@ -1614,10 +1614,16 @@ function badgeRemark(remark){
   const map = {
     "Matched":"good",
     "Damaged":"critical","Unrecorded (Extra)":"none","Missing/Shortage":"none","Other":"role",
+    "Received but tagged to wrong SKU":"role",
     "Issued but not deducted":"critical",
     "Transferred but not recorded":"critical",
     "Stored in another location":"role",
-    "Damaged/scrapped without documentation":"none",
+    "Received but not recorded":"critical",
+    "Returned but not recorded":"critical",
+    "Wrong quantity recorded":"role",
+    "Wrong SKU/Part recorded":"role",
+    "Damaged/Scrapped without documentation":"none",
+    "Pending Transaction":"role",
     "Unexplained/Missing":"none",
   };
   const cls = map[remark]||"role";
